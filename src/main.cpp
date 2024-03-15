@@ -1,95 +1,133 @@
 #include "ceres/ceres.h"
+#include "ceres/numeric_diff_options.h"
 #include "glog/logging.h"
-#include <Eigen/Dense>
 
-// A templated cost functor that implements the residual r = 10 -
-// x. The method operator() is templated so that we can then use an
-// automatic differentiation wrapper around it to generate its
-// derivatives.
-class CostFunctor
-{
-public:
-  CostFunctor(
-      const Eigen::Matrix<double, 3, 3> &camera_intrinsics)
-      : camera_intrinsics_(camera_intrinsics)
-  {
-    camera_intrinsics_inv_ = camera_intrinsics_.inverse();
-  }
+// CUDA
+#ifdef __INTELLISENSE__
+#define __CUDACC__
+#endif
+#include <cuda.h>
+#include <cuda_runtime.h>
+#include <jetson-utils/cudaMappedMemory.h>
+#include "motion_compensation.h"
+#include "reduce.h"
+#include "mc_functor.h"
+#include "mc_gradient.h"
+#include "mc_leastsquares.h"
 
-  template <typename T>
-  bool operator()(const T * x, const T *const  t, const T * rotations, T* residual) const
-  {
-    // Eigen::Matrix<T, 3, 3> rotation_matrix = (Eigen::AngleAxisf(rotations[0] * t[0], Eigen::Vector3f::UnitZ()) * Eigen::AngleAxisf(rotations[1] * t[0], Eigen::Vector3f::UnitY()) * Eigen::AngleAxisf(rotations[2]* t[0], Eigen::Vector3f::UnitZ())).normalized().toRotationMatrix().cast<T>();
-    Eigen::Matrix<T, 3, 3> rotation_matrix =Eigen::Matrix<T, 3, 3>::Zero();
-    rotation_matrix(0,1)=-rotations[2]*t[0];
-    rotation_matrix(0,2)=rotations[1]*t[0];
-    rotation_matrix(1,0)=rotations[2]*t[0];
-    rotation_matrix(1,2)=-rotations[0]*t[0];
-    rotation_matrix(2,0)=-rotations[1]*t[0];
-    rotation_matrix(2,1)=rotations[0]*t[0];
+#include <fstream>
+#include <iostream>
+#include <vector>
 
-    Eigen::Map<const Eigen::Matrix<T, 3, 1>> point(x);
+#include <opencv2/opencv.hpp>
+#include <opencv2/core.hpp>
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/highgui/highgui.hpp>
 
-    const Eigen::Matrix<T, 3, 1> unprojected_point =
-        (camera_intrinsics_inv_ * point);
-
-    const Eigen::Matrix<T, 3, 1> rotated_point =
-        (rotation_matrix * unprojected_point);
-
-    const Eigen::Matrix<T, 2, 1> reprojected_pixel =
-        (camera_intrinsics_ * rotated_point).hnormalized();
-    residual[0] = reprojected_pixel[0] - reprojected_pixel[1];
-    return true;
-  }
-
-  // // accepts u v and camera intrinsics flattened
-  // // returns X Y Z
-  // template <typename T>
-  // T unproject(T coords,T intrinsics) const{
-  //   T unprojected_coords[3];
-  //   unprojected_coords[0]=(coords[0]/intrinsics[0])-intrinsics[2];
-  //   unprojected_coords[1]=(coords[1]/intrinsics[4])-intrinsics[5];
-  //   unprojected_coords[2]=1;
-  //   return unprojected_coords;
-  // }
-  // // accepts X Y Z and camera intrinsics flattened
-  // // returns u v
-  // template <typename T>
-  // T unproject(T coords,T intrinsics) const{
-  //   T projected_coords[2];
-  //   projected_coords[0]=(coords[0]/intrinsics[0])-intrinsics[2];
-  //   projected_coords[1]=(coords[1]/intrinsics[4])-intrinsics[5];
-  //   return projected_coords;
-  // }
-
-private:
-  const Eigen::Matrix<double, 3, 3> &camera_intrinsics_;
-  Eigen::Matrix<double, 3, 3> camera_intrinsics_inv_;
-};
 int main(int argc, char **argv)
 {
-  google::InitGoogleLogging(argv[0]);
-  // The variable to solve for with its initial value. It will be
-  // mutated in place by the solver.
-  double x[3] = {1,66,77};
-  double t = 0.5;
-  double rotations[3] = {1, 1, 1};
-  const double initial_x = x[0];
-  // Build the problem.
-  ceres::Problem problem;
 
-  Eigen::Matrix<double, 3, 3> intrinsics=Eigen::Matrix<double, 3, 3>::Identity();
-  // Set up the only cost function (also known as residual). This uses
-  // auto-differentiation to obtain the derivative (jacobian).
-  ceres::CostFunction *cost_function =
-      new ceres::AutoDiffCostFunction<CostFunctor, 1, 3, 1, 3>(new CostFunctor(intrinsics));
-  problem.AddResidualBlock(cost_function, nullptr, x, &t, rotations);
-  // Run the solver!
-  ceres::Solver::Options options;
-  options.minimizer_progress_to_stdout = true;
-  ceres::Solver::Summary summary;
-  ceres::Solve(options, &problem, &summary);
-  std::cout << summary.BriefReport() << "\n";
-  std::cout << "x : " << initial_x << " -> " << x << "\n";
-  return 0;
+    std::cout.precision(std::numeric_limits<double>::digits10 + 1);
+    int height = 180;
+    int width = 240;
+    double lower_bound = -5 * 2 * M_PI;
+    double upper_bound = 5 * 2 * M_PI;
+    bool slice_window = false;
+    double fx=199.092366542, fy=198.82882047, cx=132.192071378, cy=110.712660011;//boxes    
+    google::InitGoogleLogging(argv[0]);
+
+    // load csv to x,y,t
+    // std::ifstream events_str("boxes_rotation.csv", std::ifstream::in);
+    std::ifstream events_str("event.csv", std::ifstream::in);
+
+    int total_event_num = std::count(std::istreambuf_iterator<char>(events_str),
+                                     std::istreambuf_iterator<char>(), '\n');
+    events_str.clear();
+    events_str.seekg(0);
+    std::string line;
+    std::vector<double> t, x, y;
+    int event_num = 0;
+    for (int i = 0; i < total_event_num; i++)
+    {
+        std::getline(events_str, line);
+        std::stringstream lineStream(line);
+        std::string cell;
+        std::getline(lineStream, cell, ',');
+        double time = stod(cell);
+        if ((!slice_window) || (time >= 30 && time < 30.01))
+        {
+            t.push_back(time);
+            std::getline(lineStream, cell, ',');
+            x.push_back(stod(cell));
+            std::getline(lineStream, cell, ',');
+            y.push_back(stod(cell));
+            event_num++;
+        }
+        else if (time >= 30.01)
+        {
+            break;
+        }
+    }
+
+    // The variable to solve for with its initial value. It will be
+    // mutated in place by the solver.
+    // double x[2] = {66, 77};
+    // double y[2] = {55, 99};
+    // double t[2] = {0.0, 0.005};
+    // const double initial_rotations[3] = {0.0000001, 0.0000001, 0.0000001};
+    const double initial_rotations[3] = {1e-5, 1e-5, 1e-5};
+    // const double initial_rotations[3] = {1.034271551346297, 1.737211928725288, -5.752976192620636};
+    double rotations[3];
+    std::copy(initial_rotations, initial_rotations + 3, rotations);
+    assert(rotations[2] == initial_rotations[2]);
+
+    // auto diff
+    // Build the problem.
+    // ceres::Problem problem;
+    // ceres::Solver::Options options;
+    // ceres::Solver::Summary summary;
+    //   ceres::CostFunction *cost_function =
+    //       new ceres::AutoDiffCostFunction<CostFunctor, 1, 3>(new CostFunctor(intrinsics, x_mat, t_vec));
+
+    // numeric diff
+    // Build the problem.
+    // ceres::Problem problem;
+    // ceres::Solver::Options options;
+    // ceres::Solver::Summary summary;
+    // auto diff_options=ceres::NumericDiffOptions();
+    // diff_options.relative_step_size=1e-6;
+    //   ceres::CostFunction *cost_function =
+    //       new ceres::NumericDiffCostFunction<McCostFunctor, ceres::CENTRAL, 1, 3>(new McCostFunctor(199.092366542, 198.82882047, 132.192071378, 110.712660011, x, y, t, height, width, event_num),ceres::TAKE_OWNERSHIP,3,diff_options);
+
+    // manual diff
+    // Build the problem.
+    McGradient* mc_gr=new McGradient(fx, fy, cx, cy, x, y, t, height, width, event_num);
+    ceres::GradientProblem problem(mc_gr);
+    ceres::GradientProblemSolver::Options options;  
+    options.max_num_line_search_step_size_iterations=4;
+    options.function_tolerance=1e-4;
+    options.parameter_tolerance=1e-6;
+
+    ceres::GradientProblemSolver::Summary summary;
+    // problem.SetParameterLowerBound(rotations, 0, lower_bound);
+    // problem.SetParameterUpperBound(rotations, 0, upper_bound);
+    // problem.SetParameterLowerBound(rotations, 1, lower_bound);
+    // problem.SetParameterUpperBound(rotations, 1, upper_bound);
+    // problem.SetParameterLowerBound(rotations, 2, lower_bound);
+    // problem.SetParameterUpperBound(rotations, 2, upper_bound);
+    // Run the solver!
+    options.minimizer_progress_to_stdout = true;
+    ceres::Solve(options, problem, rotations, &summary);
+    std::cout << summary.FullReport() << "\n";
+    std::cout << "rot : " << initial_rotations[0] << " " << initial_rotations[1] << " " << initial_rotations[2] << " "
+              << " -> " << rotations[0] << " " << rotations[1] << " " << rotations[2] << " "
+              << "\n";
+    uint8_t *output_image;
+    tryCudaAllocMapped(&output_image,height*width*sizeof(uint8_t),"output_image");
+
+    mc_gr->GenerateImage(rotations,output_image,-summary.final_cost);
+    cv::Mat mat(height, width, CV_8U,output_image);
+    cv::imwrite("output.png", mat);
+
+    return 0;
 }

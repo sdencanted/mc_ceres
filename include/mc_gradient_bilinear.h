@@ -127,47 +127,53 @@ public:
         cudaEventElapsedTime(&time_ms, start, stop);
         cudaEventDestroy(start);
         cudaEventDestroy(stop);
-        std::cout<<"fillImage time: "<<time_ms<<std::endl;
+        // std::cout<<"fillImage time: "<<time_ms<<std::endl;
 
         // remove mean from image
-        cudaEventCreate(&start);
-        cudaEventCreate(&stop);
-        cudaEventRecord(start);
-        subtractMean(image_, height_, width_ , cub_temp_size_);
-        if (do_jacobian)
-        {
-            subtractMean(image_del_theta_x_, height_ , width_ , cub_temp_size_);
-            subtractMean(image_del_theta_y_, height_ , width_ , cub_temp_size_);
-            subtractMean(image_del_theta_z_, height_, width_ , cub_temp_size_);
-        }
-        cudaDeviceSynchronize();
-        cudaEventRecord(stop);
-        cudaEventSynchronize(stop);
-        cudaEventElapsedTime(&time_ms, start, stop);
-        cudaEventDestroy(start);
-        cudaEventDestroy(stop);
-        std::cout<<"subtractmean time: "<<time_ms<<std::endl;
+        // cudaEventCreate(&start);
+        // cudaEventCreate(&stop);
+        // cudaEventRecord(start);
+        // subtractMean(image_, height_, width_ , cub_temp_size_);
+        // if (do_jacobian)
+        // {
+        //     subtractMean(image_del_theta_x_, height_ , width_ , cub_temp_size_);
+        //     subtractMean(image_del_theta_y_, height_ , width_ , cub_temp_size_);
+        //     subtractMean(image_del_theta_z_, height_, width_ , cub_temp_size_);
+        // }
+        // cudaDeviceSynchronize();
+        // cudaEventRecord(stop);
+        // cudaEventSynchronize(stop);
+        // cudaEventElapsedTime(&time_ms, start, stop);
+        // cudaEventDestroy(start);
+        // cudaEventDestroy(stop);
+        // std::cout<<"subtractmean time: "<<time_ms<<std::endl;
 
         // Calculate contrast and if needed jacobian
         cudaEventCreate(&start);
         cudaEventCreate(&stop);
         cudaEventRecord(start);
-        residuals[0] = -getContrast(image_, height_, width_, cub_temp_size_);
-        if (do_jacobian)
-        {
-            gradient[0] = -getContrastDel(image_, image_del_theta_x_, height_, width_, cub_temp_size_);
-            gradient[1] = -getContrastDel(image_, image_del_theta_y_, height_, width_, cub_temp_size_);
-            gradient[2] = -getContrastDel(image_, image_del_theta_z_, height_, width_, cub_temp_size_);
-
-            // std::cout << "gradient " << gradient[0] << " " << gradient[1] << " " << gradient[2] << std::endl;
+        
+        if (do_jacobian){
+            getContrastDelBatch(image_,image_del_theta_x_,image_del_theta_y_,image_del_theta_z_,residuals,gradient,height_,width_,cub_temp_size_);
         }
+        else{
+            residuals[0] = -getContrast(image_, height_, width_, cub_temp_size_);
+        }
+        // if (do_jacobian)
+        // {
+        //     gradient[0] = -getContrastDel(image_, image_del_theta_x_, height_, width_, cub_temp_size_);
+        //     gradient[1] = -getContrastDel(image_, image_del_theta_y_, height_, width_, cub_temp_size_);
+        //     gradient[2] = -getContrastDel(image_, image_del_theta_z_, height_, width_, cub_temp_size_);
+
+        //     // std::cout << "gradient " << gradient[0] << " " << gradient[1] << " " << gradient[2] << std::endl;
+        // }
         cudaDeviceSynchronize();
         cudaEventRecord(stop);
         cudaEventSynchronize(stop);
         cudaEventElapsedTime(&time_ms, start, stop);
         cudaEventDestroy(start);
         cudaEventDestroy(stop);
-        std::cout<<"getcontrast time: "<<time_ms<<std::endl;
+        // std::cout<<"getcontrast time: "<<time_ms<<std::endl;
         // std::cout << "residual " << residuals[0] << std::endl;
         return true;
     }

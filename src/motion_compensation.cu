@@ -224,7 +224,6 @@ __global__ void fillImageBilinear_(float fx, float fy, float cx, float cy, int h
             atomicAdd(&image[idx4], (x_diff) * (y_diff));
             if (do_jacobian)
             {
-
                 float del_x_del_theta_x, del_x_del_theta_y, del_x_del_theta_z, del_y_del_theta_x, del_y_del_theta_y, del_y_del_theta_z;
                 float fx_div_z_rotated = fx * z_rotated_inv;
                 float fy_div_z_rotated = fy * z_rotated_inv;
@@ -242,20 +241,38 @@ __global__ void fillImageBilinear_(float fx, float fy, float cx, float cy, int h
                 float d3y = 1 - x_diff;
                 float d4x = y_diff;
                 float d4y = x_diff;
-                atomicAdd(&image_del_x[idx1], d1x * del_x_del_theta_x + d1y * del_y_del_theta_x);
-                atomicAdd(&image_del_x[idx2], d2x * del_x_del_theta_x + d2y * del_y_del_theta_x);
-                atomicAdd(&image_del_x[idx3], d3x * del_x_del_theta_x + d3y * del_y_del_theta_x);
-                atomicAdd(&image_del_x[idx4], d4x * del_x_del_theta_x + d4y * del_y_del_theta_x);
 
-                atomicAdd(&image_del_y[idx1], d1x * del_x_del_theta_y + d1y * del_y_del_theta_y);
-                atomicAdd(&image_del_y[idx2], d2x * del_x_del_theta_y + d2y * del_y_del_theta_y);
-                atomicAdd(&image_del_y[idx3], d3x * del_x_del_theta_y + d3y * del_y_del_theta_y);
-                atomicAdd(&image_del_y[idx4], d4x * del_x_del_theta_y + d4y * del_y_del_theta_y);
+                float dx1=d1x * del_x_del_theta_x + d1y * del_y_del_theta_x;
+                float dx2=d2x * del_x_del_theta_x + d2y * del_y_del_theta_x;
+                float dx3=d3x * del_x_del_theta_x + d3y * del_y_del_theta_x;
+                float dx4=d4x * del_x_del_theta_x + d4y * del_y_del_theta_x;
 
-                atomicAdd(&image_del_z[idx1], d1x * del_x_del_theta_z + d1y * del_y_del_theta_z);
-                atomicAdd(&image_del_z[idx2], d2x * del_x_del_theta_z + d2y * del_y_del_theta_z);
-                atomicAdd(&image_del_z[idx3], d3x * del_x_del_theta_z + d3y * del_y_del_theta_z);
-                atomicAdd(&image_del_z[idx4], d4x * del_x_del_theta_z + d4y * del_y_del_theta_z);
+                float dy1=d1x * del_x_del_theta_y + d1y * del_y_del_theta_y;
+                float dy2=d2x * del_x_del_theta_y + d2y * del_y_del_theta_y;
+                float dy3=d3x * del_x_del_theta_y + d3y * del_y_del_theta_y;
+                float dy4=d4x * del_x_del_theta_y + d4y * del_y_del_theta_y;
+
+                float dz1=d1x * del_x_del_theta_z + d1y * del_y_del_theta_z;
+                float dz2=d2x * del_x_del_theta_z + d2y * del_y_del_theta_z;
+                float dz3=d3x * del_x_del_theta_z + d3y * del_y_del_theta_z;
+                float dz4=d4x * del_x_del_theta_z + d4y * del_y_del_theta_z;
+
+                atomicAdd(&image_del_x[idx1], dx1);
+                atomicAdd(&image_del_y[idx1], dy1);
+                atomicAdd(&image_del_z[idx1], dz1);
+                
+                atomicAdd(&image_del_x[idx2], dx2);
+                atomicAdd(&image_del_y[idx2], dy2);
+                atomicAdd(&image_del_z[idx2], dz2);
+                
+                atomicAdd(&image_del_x[idx3], dx3);
+                atomicAdd(&image_del_y[idx3], dy3);
+                atomicAdd(&image_del_z[idx3], dz3);
+                
+                atomicAdd(&image_del_x[idx4], dx4);
+                atomicAdd(&image_del_y[idx4], dy4);
+                atomicAdd(&image_del_z[idx4], dz4);
+                
             }
         }
     }
@@ -546,7 +563,7 @@ void subtractMean(float *image, int height, int width, int cub_temp_size)
     // cudaEventDestroy(stop);
     // std::cout<<"actual subtractmean time: "<<time_ms<<std::endl;
 }
-__global__ void getContrast_(float *image, int num_elements, float *image_out)
+__global__ void getContrast_(float *image, int num_elements, float *image_out,float mean)
 {
     // size_t thread_grid_idx = size_t(blockIdx.x * blockDim.x + threadIdx.x);
     // size_t num_threads_in_grid = size_t(blockDim.x * gridDim.x);
@@ -558,8 +575,8 @@ __global__ void getContrast_(float *image, int num_elements, float *image_out)
 
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
 
-    
-    image_out[idx] = image[idx] * image[idx];
+    float image_norm=image[idx]-mean;
+    image_out[idx] =image_norm*image_norm;
     // if (idx < num_elements)
     // {
     //     image_out[idx] = image[idx] * image[idx];
@@ -567,6 +584,11 @@ __global__ void getContrast_(float *image, int num_elements, float *image_out)
 }
 float getContrast(float *image, int height, int width, int cub_temp_size)
 {
+
+    
+    float mean_cuda = getMean(image, height, width, cub_temp_size);
+
+
     float contrast = 0;
 
     float *temp_image;
@@ -583,13 +605,67 @@ float getContrast(float *image, int height, int width, int cub_temp_size)
     //                                    getContrast_, 0, 0);
     // Round up according to array size
     // gridSize = (height * width + blockSize - 1) / blockSize;
-    getContrast_<<<gridSize, blockSize>>>(image, (height) * (width), temp_image);
+    getContrast_<<<gridSize, blockSize>>>(image, (height) * (width), temp_image,mean_cuda);
     // std::cout<<"getContrast "<< gridSize<<" "<< blockSize<<std::endl;
     contrast = getMean(temp_image, height, width, cub_temp_size);
     checkCudaErrors(cudaFree(temp_image));
     return contrast;
 }
 
+__global__ void getContrastDelBatch_(float *image, float *image_del_theta_x, float *image_del_theta_y, float *image_del_theta_z, int num_elements,float mean,float mean_x,float mean_y,float mean_z)
+{
+    // size_t thread_grid_idx = size_t(blockIdx.x * blockDim.x + threadIdx.x);
+    // size_t num_threads_in_grid = size_t(blockDim.x * gridDim.x);
+    // for (size_t i = thread_grid_idx; i <  num_elements; i += num_threads_in_grid)
+    // {
+    //     image_del[i] *= image[i];
+    // }
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    float image_norm=image[idx]-mean;
+    float image_norm_x=image_del_theta_x[idx]-mean_x;
+    float image_norm_y=image_del_theta_y[idx]-mean_y;
+    float image_norm_z=image_del_theta_z[idx]-mean_z;
+    image[idx] =image_norm*image_norm;
+    image_del_theta_x[idx]=image_norm*image_norm_x;
+    image_del_theta_y[idx]=image_norm*image_norm_y;
+    image_del_theta_z[idx]=image_norm*image_norm_z;
+    // if (idx < num_elements)
+    // {
+    //     image_del[idx] *= image[idx];
+    // }
+}
+void getContrastDelBatch(float *image, float *image_del_theta_x,float *image_del_theta_y,float *image_del_theta_z, 
+double *image_contrast, double *image_del_theta_contrast,
+int height, int width, int cub_temp_size)
+{
+    
+    float *temp_image;
+    checkCudaErrors(cudaMalloc((void **)&temp_image, (unsigned int)sizeof(float) * (height) * (width)));
+    // float contrast = 0;
+    // const int num_sm = 8; // Jetson Orin NX
+    // const int blocks_per_sm = 4;
+    // const int threads_per_block = 128;
+    int blockSize=57;   // The launch configurator returned block size
+    // int minGridSize; // The minimum grid size needed to achieve the
+    //                  // maximum occupancy for a full device launch
+    int gridSize=768;    // The actual grid size needed, based on input size
+
+    // cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize,
+    //                                    getContrastDelBatch_, 0, 0);
+    // Round up according to array size
+    // gridSize = (height * width + blockSize - 1) / blockSize;
+    // std::cout<<"getContrastDel "<< gridSize<<" "<< blockSize<<std::endl;
+    float mean = getMean(image, height, width, cub_temp_size);
+    float mean_x = getMean(image_del_theta_x, height, width, cub_temp_size);
+    float mean_y = getMean(image_del_theta_y, height, width, cub_temp_size);
+    float mean_z = getMean(image_del_theta_z, height, width, cub_temp_size);
+    getContrastDelBatch_<<<gridSize, blockSize>>>(image, image_del_theta_x, image_del_theta_y, image_del_theta_z, height* width,mean,mean_x,mean_y,mean_z);
+    image_contrast[0] = -getMean(temp_image, height, width, cub_temp_size);
+    image_del_theta_contrast[0] = -2 * getMean(image_del_theta_x, height, width, cub_temp_size);
+    image_del_theta_contrast[1] = -2 * getMean(image_del_theta_y, height, width, cub_temp_size);
+    image_del_theta_contrast[2] = -2 * getMean(image_del_theta_z, height, width, cub_temp_size);
+    checkCudaErrors(cudaFree(temp_image));
+}
 __global__ void getContrastDel_(float *image, float *image_del, int num_elements)
 {
     // size_t thread_grid_idx = size_t(blockIdx.x * blockDim.x + threadIdx.x);

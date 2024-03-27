@@ -3,11 +3,15 @@
 #define CUDACMAKE_TEST_H
 #include <stdint.h>
 #include <reduce.h>
-void fillImage(double fx,double fy,double cx,double cy, int height,int width, int num_events, double*x_unprojected,double*y_unprojected,double*x_prime,double*y_prime,double*t,double*image,const double rotation_x,const double rotation_y,const double rotation_z,bool do_jacobian, double* image_del_x, double* image_del_y, double* image_del_z);
-double getMean(double *image,int height,int width, int cub_temp_size=0);
-void subtractMean(double *image,int height,int width, int cub_temp_size=0);
-double getContrast(double *image,int height,int width, int cub_temp_size=0);
-double getContrastDel(double *image,double *image_del,int height,int width, int cub_temp_size=0);
-void fillImageKronecker(int height, int width, int num_events,double *x_prime, double *y_prime,double *image);
-int getCubSize(double *image, int height, int width);
+void fillImage(float fx,float fy,float cx,float cy, int height,int width, int num_events, float*x_unprojected,float*y_unprojected,float*x_prime,float*y_prime,float*t,float*image,const float rotation_x,const float rotation_y,const float rotation_z,bool do_jacobian, float* image_del_x, float* image_del_y, float* image_del_z);
+void fillImageBilinear(float fx,float fy,float cx,float cy, int height,int width, int num_events, float*x_unprojected,float*y_unprojected,float*x_prime,float*y_prime,float*t,float*image,const float rotation_x,const float rotation_y,const float rotation_z,bool do_jacobian, float* image_del_x, float* image_del_y, float* image_del_z);
+void fillImageBilinearIntrinsics(float fx,float fy,float cx,float cy, int height,int width, int num_events, float*x_unprojected,float*y_unprojected,float*x_prime,float*y_prime,float*t,float*image,const float rotation_x,const float rotation_y,const float rotation_z,bool do_jacobian, float* image_del_x, float* image_del_y, float* image_del_z);
+float getMean(float *image,int height,int width, int cub_temp_size=0);
+void subtractMean(float *image,int height,int width, int cub_temp_size=0);
+float getContrast(float *image,int height,int width, int cub_temp_size=0);
+float getContrastDel(float *image,float *image_del,int height,int width, int cub_temp_size=0);
+void fillImageKronecker(int height, int width, int num_events,float *x_prime, float *y_prime,float *image);
+int getCubSize(float *image, int height, int width);
+float getMax(float *image, int height, int width);
+void fillImageBilinearSeparate(float fx,float fy,float cx,float cy, int height,int width, int num_events, float*x_unprojected,float*y_unprojected,float*x_prime,float*y_prime,float*t,float*image,const float rotation_x,const float rotation_y,const float rotation_z,bool do_jacobian, float* image_del_x, float* image_del_y, float* image_del_z);
 #endif //CUDACMAKE_TEST_H

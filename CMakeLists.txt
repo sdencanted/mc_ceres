@@ -33,6 +33,8 @@ link_directories(/usr/lib/aarch64-linux-gnu/tegra)
 find_package (OpenCV 4.0.0 REQUIRED)
 include_directories(${OpenCV_INCLUDE_DIRS})
 
+# GSL
+find_package(GSL REQUIRED)
 
 include_directories(${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/include)
 
@@ -47,8 +49,35 @@ target_link_libraries(main
     ${CUDA_LIBRARIES}
     jetson-utils
     ${OpenCV_LIBS}
+    GSL::gsl 
+    GSL::gslcblas
 )
 
-# helloworld
-add_executable(helloworld_analytic src/helloworld_analytic.cpp)
-target_link_libraries(helloworld_analytic Ceres::ceres)
+# main gsl
+cuda_add_executable(main_gsl src/main_gsl.cpp src/reduce.cu src/motion_compensation.cu )
+set_target_properties(main_gsl PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+target_include_directories(main_gsl
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_link_libraries(main_gsl
+    Ceres::ceres
+    ${CUDA_LIBRARIES}
+    jetson-utils
+    ${OpenCV_LIBS}
+    GSL::gsl 
+    GSL::gslcblas
+)
+# plot
+cuda_add_executable(plot src/plot.cpp src/reduce.cu src/motion_compensation.cu )
+set_target_properties(plot PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+target_include_directories(plot
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_link_libraries(plot
+    Ceres::ceres
+    ${CUDA_LIBRARIES}
+    jetson-utils
+    ${OpenCV_LIBS}
+    GSL::gsl 
+    GSL::gslcblas
+)

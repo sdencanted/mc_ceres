@@ -39,7 +39,7 @@ void checkResultsExact(const T* const ref, const T* const gpu, size_t numElem) {
 }
 
 template<typename T>
-void checkResultsEps(const T* const ref, const T* const gpu, size_t numElem, double eps1, double eps2) {
+void checkResultsEps(const T* const ref, const T* const gpu, size_t numElem, float eps1, float eps2) {
   assert(eps1 >= 0 && eps2 >= 0);
   unsigned long long totalDiff = 0;
   unsigned numSmallDifferences = 0;
@@ -64,7 +64,7 @@ void checkResultsEps(const T* const ref, const T* const gpu, size_t numElem, dou
     }
     totalDiff += diff * diff;
   }
-  double percentSmallDifferences = (double)numSmallDifferences / (double)numElem;
+  float percentSmallDifferences = (float)numSmallDifferences / (float)numElem;
   if (percentSmallDifferences > eps2) {
     std::cerr << "Total percentage of non-zero pixel difference between the two images exceeds " << 100.0 * eps2 << "%" << std::endl;
     std::cerr << "Percentage of non-zero pixel differences: " << 100.0 * percentSmallDifferences << "%" << std::endl;
@@ -75,7 +75,7 @@ void checkResultsEps(const T* const ref, const T* const gpu, size_t numElem, dou
 //Uses the autodesk method of image comparison
 //Note the the tolerance here is in PIXELS not a percentage of input pixels
 template<typename T>
-void checkResultsAutodesk(const T* const ref, const T* const gpu, size_t numElem, double variance, size_t tolerance)
+void checkResultsAutodesk(const T* const ref, const T* const gpu, size_t numElem, float variance, size_t tolerance)
 {
 
   size_t numBadPixels = 0;

@@ -15,7 +15,7 @@
 using namespace cooperative_groups;
 
 // Reduces a thread group to a single element
-__device__ double reduce_sum(thread_group g, double *temp, double val){
+__device__ float reduce_sum(thread_group g, float *temp, float val){
 	int lane = g.thread_rank();
 
 	// Each thread adds its partial sum[i] to sum[lane+i]
@@ -34,29 +34,29 @@ __device__ double reduce_sum(thread_group g, double *temp, double val){
 }
 
 // Creates partials sums from the original array
-__device__ double thread_sum(double *input, int n){
-	double sum = 0;
+__device__ float thread_sum(float *input, int n){
+	float sum = 0;
 	int tid = blockIdx.x * blockDim.x + threadIdx.x;
 	for (int i = tid; i < n / 2; i += blockDim.x * gridDim.x){
 		// Cast as int4 
-		double2 in = ((double2*)input)[i];
+		float2 in = ((float2*)input)[i];
 		sum += in.x + in.y;
 	}
 	return sum;
 }
 
-__global__ void sum_reduction(double *sum, double *input, int n){
+__global__ void sum_reduction(float *sum, float *input, int n){
 	// Create partial sums from the array
-	double my_sum = thread_sum(input, n);
+	float my_sum = thread_sum(input, n);
 
 	// Dynamic shared memory allocation
-	extern __shared__ double temp[];
+	extern __shared__ float temp[];
 	
 	// Identifier for a TB
 	auto g = this_thread_block();
 	
 	// Reudce each TB
-	double block_sum = reduce_sum(g, temp, my_sum);
+	float block_sum = reduce_sum(g, temp, my_sum);
 
 	// Collect the partial result from each TB
 	if (g.thread_rank() == 0) {
@@ -64,15 +64,15 @@ __global__ void sum_reduction(double *sum, double *input, int n){
 	}
 }
 
-double gpu_sum_reduce(double* d_in, unsigned int d_in_len){
+float gpu_sum_reduce(float* d_in, unsigned int d_in_len){
 
 	// result vector
-    double sum_cpu = 0;
-	double *sum;
+    float sum_cpu = 0;
+	float *sum;
 
 
-    cudaMalloc((void **)&sum, (unsigned int)sizeof(double));
-    cudaMemcpy( sum,&sum_cpu, sizeof(double), cudaMemcpyHostToDevice);
+    cudaMalloc((void **)&sum, (unsigned int)sizeof(float));
+    cudaMemcpy( sum,&sum_cpu, sizeof(float), cudaMemcpyHostToDevice);
 
 	// TB Size
 	int TB_SIZE = 128;
@@ -81,11 +81,11 @@ double gpu_sum_reduce(double* d_in, unsigned int d_in_len){
 	int GRID_SIZE = (d_in_len + TB_SIZE - 1) / TB_SIZE;
 
 	// Call kernel with dynamic shared memory (Could decrease this to fit larger data)
-	sum_reduction <<<GRID_SIZE, TB_SIZE, d_in_len * sizeof(double)>>> (sum, d_in, d_in_len);
+	sum_reduction <<<GRID_SIZE, TB_SIZE, d_in_len * sizeof(float)>>> (sum, d_in, d_in_len);
 
 	// Synchronize the kernel
 	// cudaDeviceSynchronize();
-    cudaMemcpy( &sum_cpu,sum, sizeof(double), cudaMemcpyDeviceToHost);
+    cudaMemcpy( &sum_cpu,sum, sizeof(float), cudaMemcpyDeviceToHost);
     cudaFree(sum);
 	return sum_cpu;
 }

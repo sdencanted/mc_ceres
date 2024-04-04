@@ -28,15 +28,30 @@ int main(int argc, char **argv){
     cudaMalloc(&image_del_theta_x_, height_*width_ * sizeof(float));
     cudaMalloc(&image_del_theta_y_, height_*width_* sizeof(float));
     cudaMalloc(&image_del_theta_z_, height_*width_ * sizeof(float));
+
+
+    float *contrast_block_sum;
+    float *contrast_del_x_block_sum;
+    float *contrast_del_y_block_sum;
+    float *contrast_del_z_block_sum;
+    float *means;
+    float *contrast_block_sum_cpu;
+    int gridSize=85;//with a block size of 512 for a 180*240 image
+
+    checkCudaErrors(cudaMalloc((void **)&contrast_block_sum, gridSize * sizeof(float)));
+    checkCudaErrors(cudaMalloc((void **)&contrast_del_x_block_sum, gridSize * sizeof(float)));
+    checkCudaErrors(cudaMalloc((void **)&contrast_del_y_block_sum, gridSize * sizeof(float)));
+    checkCudaErrors(cudaMalloc((void **)&contrast_del_z_block_sum, gridSize * sizeof(float)));
+    checkCudaErrors(cudaMalloc(&means, 4 * sizeof(float)));
+    checkCudaErrors(cudaMallocHost(&contrast_block_sum_cpu, sizeof(float) * 4));
+
+
     float image_two[height_*width_];
     std::fill_n(image_two,height_*width_,2);
     image_two[0]=0;
 
 
-    int cub_temp_size= getCubSize(image_, height_, width_);
-    float* temp_storage;
     
-    checkCudaErrors(cudaMalloc(&temp_storage, cub_temp_size));
     std::cout<<image_two[0]<<std::endl;
 
 
@@ -69,13 +84,19 @@ int main(int argc, char **argv){
         ms++;
 
         nvtxRangePushA("my_function"); // Begins NVTX range
-        getContrastDelBatchReduce(image_, image_del_theta_x_, image_del_theta_y_, image_del_theta_z_, residuals, gradient, height_, width_,cub_temp_size, temp_storage);
+        getContrastDelBatchReduce(image_, image_del_theta_x_, image_del_theta_y_, image_del_theta_z_, residuals, gradient, height_, width_,contrast_block_sum,contrast_del_x_block_sum,contrast_del_y_block_sum,contrast_del_z_block_sum,means,contrast_block_sum_cpu);
         nvtxRangePop(); // Ends NVTX range
         std::cout<<gradient[0]<<" "<<gradient[1]<<" "<<gradient[2]<<" "<<residuals[0]<<std::endl;
     }
-    cudaFree(temp_storage);
     cudaFree(image_);
     cudaFree(image_del_theta_x_);
     cudaFree(image_del_theta_y_);
     cudaFree(image_del_theta_z_);
+    
+    checkCudaErrors(cudaFree(contrast_block_sum));
+    checkCudaErrors(cudaFree(contrast_del_x_block_sum));
+    checkCudaErrors(cudaFree(contrast_del_y_block_sum));
+    checkCudaErrors(cudaFree(contrast_del_z_block_sum));
+    checkCudaErrors(cudaFreeHost(contrast_block_sum_cpu));
+    checkCudaErrors(cudaFree(means));
 }

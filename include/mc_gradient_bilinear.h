@@ -35,9 +35,16 @@ public:
         cudaFree(image_del_theta_x_);
         cudaFree(image_del_theta_y_);
         cudaFree(image_del_theta_z_);
+
+        checkCudaErrors(cudaFree(contrast_block_sum_));
+        checkCudaErrors(cudaFree(contrast_del_x_block_sum_));
+        checkCudaErrors(cudaFree(contrast_del_y_block_sum_));
+        checkCudaErrors(cudaFree(contrast_del_z_block_sum_));
+        checkCudaErrors(cudaFreeHost(contrast_block_sum_cpu_));
+        checkCudaErrors(cudaFree(means_));
     }
     McGradientBilinear(const float fx, const float fy, const float cx, const float cy,
-                       std::vector<float> &x, std::vector<float> &y, std::vector<float> &t, const int height, const int width, const int num_events, bool middle_timestamp, bool split_func = false,bool integrate_reduction=false) : fx_(fx), fy_(fy), cx_(cx), cy_(cy), height_(height), width_(width), num_events_(num_events), split_func_(split_func),integrate_reduction_(integrate_reduction)
+                       std::vector<float> &x, std::vector<float> &y, std::vector<float> &t, const int height, const int width, const int num_events, bool middle_timestamp, bool split_func = false, bool integrate_reduction = false, int gridSize = 85) : fx_(fx), fy_(fy), cx_(cx), cy_(cy), height_(height), width_(width), num_events_(num_events), split_func_(split_func), integrate_reduction_(integrate_reduction)
     {
         // create pinned memory for x,y,t,image,image dels
         cudaMalloc(&x_unprojected_, num_events_ * sizeof(float));
@@ -49,10 +56,17 @@ public:
         cudaMalloc(&image_del_theta_x_, (height_) * (width_) * sizeof(float));
         cudaMalloc(&image_del_theta_y_, (height_) * (width_) * sizeof(float));
         cudaMalloc(&image_del_theta_z_, (height_) * (width_) * sizeof(float));
-        // cudaMalloc(&image_, 57 * 768 * sizeof(float));
-        // cudaMalloc(&image_del_theta_x_, 57 * 768 * sizeof(float));
-        // cudaMalloc(&image_del_theta_y_, 57 * 768 * sizeof(float));
-        // cudaMalloc(&image_del_theta_z_, 57 * 768 * sizeof(float));
+
+        cudaMemsetAsync(image_, 0, (height_) * (width_) * sizeof(float));
+        cudaMemsetAsync(image_del_theta_x_, 0, (height_) * (width_) * sizeof(float));
+        cudaMemsetAsync(image_del_theta_y_, 0, (height_) * (width_) * sizeof(float));
+        cudaMemsetAsync(image_del_theta_z_, 0, (height_) * (width_) * sizeof(float));
+        checkCudaErrors(cudaMalloc((void **)&contrast_block_sum_, gridSize * sizeof(float)));
+        checkCudaErrors(cudaMalloc((void **)&contrast_del_x_block_sum_, gridSize * sizeof(float)));
+        checkCudaErrors(cudaMalloc((void **)&contrast_del_y_block_sum_, gridSize * sizeof(float)));
+        checkCudaErrors(cudaMalloc((void **)&contrast_del_z_block_sum_, gridSize * sizeof(float)));
+        checkCudaErrors(cudaMalloc(&means_, 4 * sizeof(float)));
+        checkCudaErrors(cudaMallocHost(&contrast_block_sum_cpu_, sizeof(float) * 4));
 
         // precalculate tX-t0 and store to t (potentially redo in CUDA later on)
         // float scale=t[num_events-1]-t[0];
@@ -86,7 +100,6 @@ public:
         cudaMemcpy(y_unprojected_, y_unprojected_cpu, num_events_ * sizeof(float), cudaMemcpyHostToDevice);
         cub_temp_size_ = getCubSize(image_, height_, width_);
         cudaMalloc(&temp_storage_, cub_temp_size_ * sizeof(float));
-        
     }
     void tryCudaAllocMapped(float **ptr, size_t size, std::string ptr_name)
     {
@@ -100,19 +113,14 @@ public:
                   double *residuals,
                   double *gradient) const override
     {
-        
+
         nvtx3::scoped_range r{"Evaluate"};
-        cudaEvent_t start, stop;
-        cudaEventCreate(&start);
-        cudaEventCreate(&stop);
-        cudaMemsetAsync(image_, 0, (height_) * (width_) * sizeof(float));
-        cudaMemsetAsync(image_del_theta_x_, 0, (height_) * (width_) * sizeof(float));
-        cudaMemsetAsync(image_del_theta_y_, 0, (height_) * (width_) * sizeof(float));
-        cudaMemsetAsync(image_del_theta_z_, 0, (height_) * (width_) * sizeof(float));
+        // cudaEvent_t start, stop;
+        // cudaEventCreate(&start);
+        // cudaEventCreate(&stop);
         bool do_jacobian = gradient != nullptr;
         // Populate image
-        
-        nvtxRangePushA("fillimage"); // Begins NVTX range
+
         if (split_func_)
         {
             fillImageBilinearSeparate(fx_, fy_, cx_, cy_, height_, width_, num_events_, x_unprojected_, y_unprojected_, x_prime_, y_prime_, t_, image_, parameters[0], parameters[1], parameters[2], do_jacobian, image_del_theta_x_, image_del_theta_y_, image_del_theta_z_);
@@ -121,19 +129,23 @@ public:
         {
             fillImageBilinear(fx_, fy_, cx_, cy_, height_, width_, num_events_, x_unprojected_, y_unprojected_, x_prime_, y_prime_, t_, image_, parameters[0], parameters[1], parameters[2], do_jacobian, image_del_theta_x_, image_del_theta_y_, image_del_theta_z_);
         }
-        nvtxRangePop();
 
         // Calculate contrast and if needed jacobian
-        
+
         nvtxRangePushA("contrast"); // Begins NVTX range
         if (do_jacobian)
         {
-            getContrastDelBatchReduce(image_, image_del_theta_x_, image_del_theta_y_, image_del_theta_z_, residuals, gradient, height_, width_, cub_temp_size_,temp_storage_);
+            getContrastDelBatchReduce(image_, image_del_theta_x_, image_del_theta_y_, image_del_theta_z_, residuals, gradient, height_, width_,
+                                      contrast_block_sum_, contrast_del_x_block_sum_, contrast_del_y_block_sum_, contrast_del_z_block_sum_, means_, contrast_block_sum_cpu_);
         }
         else
         {
             residuals[0] = -getContrast(image_, height_, width_, cub_temp_size_);
         }
+        cudaMemsetAsync(image_, 0, (height_) * (width_) * sizeof(float));
+        cudaMemsetAsync(image_del_theta_x_, 0, (height_) * (width_) * sizeof(float));
+        cudaMemsetAsync(image_del_theta_y_, 0, (height_) * (width_) * sizeof(float));
+        cudaMemsetAsync(image_del_theta_z_, 0, (height_) * (width_) * sizeof(float));
         nvtxRangePop();
         return true;
     }
@@ -179,7 +191,14 @@ private:
     float cx_;
     float cy_;
     int cub_temp_size_;
-    float* temp_storage_;
+    float *temp_storage_;
+
+    float *contrast_block_sum_;
+    float *contrast_del_x_block_sum_;
+    float *contrast_del_y_block_sum_;
+    float *contrast_del_z_block_sum_;
+    float *means_;
+    float *contrast_block_sum_cpu_;
 };
 
 #endif // MC_GRADIENT_BILINEAR_H

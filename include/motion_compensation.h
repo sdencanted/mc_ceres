@@ -24,7 +24,13 @@ void getContrastDelBatchReduce(float *image, float *image_del_theta_x, float *im
                                
 void getContrastDelBatchReduce(float *image, float *image_del_theta_x, float *image_del_theta_y, float *image_del_theta_z,
                                double *image_contrast, double *image_del_theta_contrast,
-                               int height, int width, int cub_temp_size, float* temp_storage);
+                               int height, int width,
+                               float *contrast_block_sum,
+                               float *contrast_del_x_block_sum,
+                               float *contrast_del_y_block_sum,
+                               float *contrast_del_z_block_sum,
+                               float *means,
+                               float *contrast_block_sum_cpu);
 void one_step_kernel(uint64_t seed, float* randoms, int numel);
 
 #endif // CUDACMAKE_TEST_H

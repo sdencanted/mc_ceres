@@ -18,6 +18,7 @@
 #include <fstream>
 #include <iostream>
 #include <vector>
+#include <nvtx3/nvtx3.hpp>
 // A CostFunction implementing motion compensation then calculating contrast, as well as the jacobian.
 class McGradientBilinear final : public ceres::FirstOrderFunction
 {
@@ -36,7 +37,7 @@ public:
         cudaFree(image_del_theta_z_);
     }
     McGradientBilinear(const float fx, const float fy, const float cx, const float cy,
-                       std::vector<float> &x, std::vector<float> &y, std::vector<float> &t, const int height, const int width, const int num_events, bool middle_timestamp, bool split_func = false) : fx_(fx), fy_(fy), cx_(cx), cy_(cy), height_(height), width_(width), num_events_(num_events), split_func_(split_func)
+                       std::vector<float> &x, std::vector<float> &y, std::vector<float> &t, const int height, const int width, const int num_events, bool middle_timestamp, bool split_func = false,bool integrate_reduction=false) : fx_(fx), fy_(fy), cx_(cx), cy_(cy), height_(height), width_(width), num_events_(num_events), split_func_(split_func),integrate_reduction_(integrate_reduction)
     {
         // create pinned memory for x,y,t,image,image dels
         cudaMalloc(&x_unprojected_, num_events_ * sizeof(float));
@@ -44,14 +45,14 @@ public:
         cudaMalloc(&x_prime_, num_events_ * sizeof(float));
         cudaMalloc(&y_prime_, num_events_ * sizeof(float));
         cudaMalloc(&t_, num_events_ * sizeof(float));
-        // cudaMalloc(&image_, (height_) * (width_) * sizeof(float));
-        // cudaMalloc(&image_del_theta_x_, (height_) * (width_) * sizeof(float));
-        // cudaMalloc(&image_del_theta_y_, (height_) * (width_) * sizeof(float));
-        // cudaMalloc(&image_del_theta_z_, (height_) * (width_) * sizeof(float));
-        cudaMalloc(&image_,57*768 * sizeof(float));
-        cudaMalloc(&image_del_theta_x_, 57*768 * sizeof(float));
-        cudaMalloc(&image_del_theta_y_, 57*768 * sizeof(float));
-        cudaMalloc(&image_del_theta_z_, 57*768 * sizeof(float));
+        cudaMalloc(&image_, (height_) * (width_) * sizeof(float));
+        cudaMalloc(&image_del_theta_x_, (height_) * (width_) * sizeof(float));
+        cudaMalloc(&image_del_theta_y_, (height_) * (width_) * sizeof(float));
+        cudaMalloc(&image_del_theta_z_, (height_) * (width_) * sizeof(float));
+        // cudaMalloc(&image_, 57 * 768 * sizeof(float));
+        // cudaMalloc(&image_del_theta_x_, 57 * 768 * sizeof(float));
+        // cudaMalloc(&image_del_theta_y_, 57 * 768 * sizeof(float));
+        // cudaMalloc(&image_del_theta_z_, 57 * 768 * sizeof(float));
 
         // precalculate tX-t0 and store to t (potentially redo in CUDA later on)
         // float scale=t[num_events-1]-t[0];
@@ -84,6 +85,8 @@ public:
         cudaMemcpy(x_unprojected_, x_unprojected_cpu, num_events_ * sizeof(float), cudaMemcpyHostToDevice);
         cudaMemcpy(y_unprojected_, y_unprojected_cpu, num_events_ * sizeof(float), cudaMemcpyHostToDevice);
         cub_temp_size_ = getCubSize(image_, height_, width_);
+        cudaMalloc(&temp_storage_, cub_temp_size_ * sizeof(float));
+        
     }
     void tryCudaAllocMapped(float **ptr, size_t size, std::string ptr_name)
     {
@@ -97,19 +100,19 @@ public:
                   double *residuals,
                   double *gradient) const override
     {
+        
+        nvtx3::scoped_range r{"Evaluate"};
         cudaEvent_t start, stop;
         cudaEventCreate(&start);
         cudaEventCreate(&stop);
-        cudaMemset(image_, 0, (height_) * (width_) * sizeof(float));
-        cudaMemset(image_del_theta_x_, 0, (height_) * (width_) * sizeof(float));
-        cudaMemset(image_del_theta_y_, 0, (height_) * (width_) * sizeof(float));
-        cudaMemset(image_del_theta_z_, 0, (height_) * (width_) * sizeof(float));
+        cudaMemsetAsync(image_, 0, (height_) * (width_) * sizeof(float));
+        cudaMemsetAsync(image_del_theta_x_, 0, (height_) * (width_) * sizeof(float));
+        cudaMemsetAsync(image_del_theta_y_, 0, (height_) * (width_) * sizeof(float));
+        cudaMemsetAsync(image_del_theta_z_, 0, (height_) * (width_) * sizeof(float));
         bool do_jacobian = gradient != nullptr;
         // Populate image
-        // std::cout << "filling" << std::endl;
-        // std::cout << "rotations " << parameters[0] << " " << parameters[1] << " " << parameters[2] << std::endl;
-
-        cudaEventRecord(start);
+        
+        nvtxRangePushA("fillimage"); // Begins NVTX range
         if (split_func_)
         {
             fillImageBilinearSeparate(fx_, fy_, cx_, cy_, height_, width_, num_events_, x_unprojected_, y_unprojected_, x_prime_, y_prime_, t_, image_, parameters[0], parameters[1], parameters[2], do_jacobian, image_del_theta_x_, image_del_theta_y_, image_del_theta_z_);
@@ -118,63 +121,20 @@ public:
         {
             fillImageBilinear(fx_, fy_, cx_, cy_, height_, width_, num_events_, x_unprojected_, y_unprojected_, x_prime_, y_prime_, t_, image_, parameters[0], parameters[1], parameters[2], do_jacobian, image_del_theta_x_, image_del_theta_y_, image_del_theta_z_);
         }
-        
-        cudaDeviceSynchronize();
-        cudaEventRecord(stop);
-        cudaEventSynchronize(stop);
-        
-        float time_ms;
-        cudaEventElapsedTime(&time_ms, start, stop);
-        cudaEventDestroy(start);
-        cudaEventDestroy(stop);
-        // std::cout<<"fillImage time: "<<time_ms<<std::endl;
-
-        // remove mean from image
-        // cudaEventCreate(&start);
-        // cudaEventCreate(&stop);
-        // cudaEventRecord(start);
-        // subtractMean(image_, height_, width_ , cub_temp_size_);
-        // if (do_jacobian)
-        // {
-        //     subtractMean(image_del_theta_x_, height_ , width_ , cub_temp_size_);
-        //     subtractMean(image_del_theta_y_, height_ , width_ , cub_temp_size_);
-        //     subtractMean(image_del_theta_z_, height_, width_ , cub_temp_size_);
-        // }
-        // cudaDeviceSynchronize();
-        // cudaEventRecord(stop);
-        // cudaEventSynchronize(stop);
-        // cudaEventElapsedTime(&time_ms, start, stop);
-        // cudaEventDestroy(start);
-        // cudaEventDestroy(stop);
-        // std::cout<<"subtractmean time: "<<time_ms<<std::endl;
+        nvtxRangePop();
 
         // Calculate contrast and if needed jacobian
-        cudaEventCreate(&start);
-        cudaEventCreate(&stop);
-        cudaEventRecord(start);
         
-        if (do_jacobian){
-            getContrastDelBatch(image_,image_del_theta_x_,image_del_theta_y_,image_del_theta_z_,residuals,gradient,height_,width_,cub_temp_size_);
+        nvtxRangePushA("contrast"); // Begins NVTX range
+        if (do_jacobian)
+        {
+            getContrastDelBatchReduce(image_, image_del_theta_x_, image_del_theta_y_, image_del_theta_z_, residuals, gradient, height_, width_, cub_temp_size_,temp_storage_);
         }
-        else{
+        else
+        {
             residuals[0] = -getContrast(image_, height_, width_, cub_temp_size_);
         }
-        // if (do_jacobian)
-        // {
-        //     gradient[0] = -getContrastDel(image_, image_del_theta_x_, height_, width_, cub_temp_size_);
-        //     gradient[1] = -getContrastDel(image_, image_del_theta_y_, height_, width_, cub_temp_size_);
-        //     gradient[2] = -getContrastDel(image_, image_del_theta_z_, height_, width_, cub_temp_size_);
-
-        //     // std::cout << "gradient " << gradient[0] << " " << gradient[1] << " " << gradient[2] << std::endl;
-        // }
-        cudaDeviceSynchronize();
-        cudaEventRecord(stop);
-        cudaEventSynchronize(stop);
-        cudaEventElapsedTime(&time_ms, start, stop);
-        cudaEventDestroy(start);
-        cudaEventDestroy(stop);
-        // std::cout<<"getcontrast time: "<<time_ms<<std::endl;
-        // std::cout << "residual " << residuals[0] << std::endl;
+        nvtxRangePop();
         return true;
     }
     int NumParameters() const override { return 3; }
@@ -200,6 +160,7 @@ public:
     int g_count = 0;
 
 private:
+    bool integrate_reduction_ = false;
     bool split_func_ = false;
     float *x_unprojected_ = NULL;
     float *y_unprojected_ = NULL;
@@ -218,6 +179,7 @@ private:
     float cx_;
     float cy_;
     int cub_temp_size_;
+    float* temp_storage_;
 };
 
 #endif // MC_GRADIENT_BILINEAR_H

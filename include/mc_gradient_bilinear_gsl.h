@@ -1,8 +1,5 @@
 #ifndef MC_GRADIENT_BILINEAR_H
 #define MC_GRADIENT_BILINEAR_H
-#include "ceres/ceres.h"
-#include "ceres/numeric_diff_options.h"
-// #include "glog/logging.h"
 
 // CUDA
 #ifdef __INTELLISENSE__
@@ -12,17 +9,15 @@
 #include <cuda_runtime.h>
 #include <jetson-utils/cudaMappedMemory.h>
 #include "motion_compensation.h"
-#include "reduce.h"
+// #include "reduce.h"
 #include "utils.h"
 
 #include <fstream>
 #include <iostream>
 #include <vector>
 #include <nvtx3/nvtx3.hpp>
-#include <pthread.h>
-#include <sys/resource.h>
 // A CostFunction implementing motion compensation then calculating contrast, as well as the jacobian.
-class McGradientBilinear final : public ceres::FirstOrderFunction
+class McGradientBilinear
 {
 
 public:
@@ -106,16 +101,14 @@ public:
     }
     bool Evaluate(const double *const parameters,
                   double *residuals,
-                  double *gradient) const override
+                  double *gradient) 
     {
-        // pthread_setschedprio(pthread_self(),-10000);
-        // setpriority(PRIO_PROCESS, pthread_self(), -10);
+
         nvtx3::scoped_range r{"Evaluate"};
         // cudaEvent_t start, stop;
         // cudaEventCreate(&start);
         // cudaEventCreate(&stop);
         bool do_jacobian = gradient != nullptr;
-        // std::cout<<do_jacobian<<std::endl;
         // Populate image
 
         fillImageBilinear(fx_, fy_, cx_, cy_, height_, width_, num_events_, x_unprojected_, y_unprojected_, x_prime_, y_prime_, t_, image_, parameters[0], parameters[1], parameters[2], do_jacobian, image_del_theta_x_, image_del_theta_y_, image_del_theta_z_);
@@ -123,7 +116,7 @@ public:
 
         // Calculate contrast and if needed jacobian
 
-        // nvtxRangePushA("contrast"); // Begins NVTX range
+        nvtxRangePushA("contrast"); // Begins NVTX range
         
         getContrastDelBatchReduce(image_, image_del_theta_x_, image_del_theta_y_, image_del_theta_z_, residuals, gradient, height_, width_,
                                     contrast_block_sum_, contrast_del_x_block_sum_, contrast_del_y_block_sum_, contrast_del_z_block_sum_, means_, contrast_block_sum_cpu_);
@@ -140,10 +133,9 @@ public:
         cudaMemsetAsync(image_del_theta_x_, 0, (height_) * (width_) * sizeof(float));
         cudaMemsetAsync(image_del_theta_y_, 0, (height_) * (width_) * sizeof(float));
         cudaMemsetAsync(image_del_theta_z_, 0, (height_) * (width_) * sizeof(float));
-        // nvtxRangePop();
+        nvtxRangePop();
         return true;
     }
-    int NumParameters() const override { return 3; }
     void GenerateImage(const double *const rotations, uint8_t *output_image)
     {
         float *image;

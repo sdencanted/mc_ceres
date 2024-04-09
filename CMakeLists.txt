@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.5)
 
+# set( ENV{BLA_VENDOR} "ATLASpootis" )
 # CUDA
+# set(CMAKE_VERBOSE_MAKEFILE ON)
 set(CMAKE_CUDA_COMPILER "/usr/local/cuda/bin/nvcc")
 set(CMAKE_CUDA_STANDARD 14)
 set(CMAKE_CUDA_ARCHITECTURES 87)
@@ -52,7 +54,8 @@ include_directories("${CUDA_INCLUDE_DIRS}")
 #         SET(USE_NVTX "OFF" PARENT_SCOPE)    
 #     endif()
 # endif()
-find_package(Ceres REQUIRED COMPONENTS SuiteSparse EigenSparse SparseLinearAlgebraLibrary LAPACK SchurSpecializations)
+# find_package(Ceres REQUIRED COMPONENTS SuiteSparse EigenSparse SparseLinearAlgebraLibrary LAPACK SchurSpecializations)
+find_package(Ceres REQUIRED COMPONENTS EigenSparse)
 
 
 # jetson-utils
@@ -61,8 +64,10 @@ include_directories(/usr/lib/aarch64-linux-gnu/tegra)
 link_directories(/usr/lib/aarch64-linux-gnu/tegra)
 
 # OpenCV
-find_package (OpenCV 4.0.0 REQUIRED)
+find_package (OpenCV 4.5.4 REQUIRED)
 include_directories(${OpenCV_INCLUDE_DIRS})
+message(STATUS "Find opencv include at ${OpenCV_INCLUDE_DIRS}")
+message(STATUS "Find opencv libraries: ${OpenCV_LIBRARIES}")
 
 # GSL
 find_package(GSL REQUIRED)
@@ -81,8 +86,6 @@ target_link_libraries(main
     ${CUDA_LIBRARIES}
     jetson-utils
     ${OpenCV_LIBS}
-    GSL::gsl 
-    GSL::gslcblas
     nvtx3-cpp
 )
 
@@ -99,6 +102,7 @@ target_link_libraries(main_gsl
     ${OpenCV_LIBS}
     GSL::gsl 
     GSL::gslcblas
+    nvtx3-cpp
 )
 # plot
 cuda_add_executable(plot src/plot.cpp src/reduce.cu src/motion_compensation.cu )
@@ -124,8 +128,8 @@ target_include_directories(cudatest
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
 )
 target_link_libraries(cudatest 
+    Ceres::ceres
     ${CUDA_LIBRARIES}
     jetson-utils
-    ${OpenCV_LIBS}
     nvtx3-cpp
 )

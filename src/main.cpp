@@ -1,6 +1,6 @@
 #include "ceres/ceres.h"
 #include "ceres/numeric_diff_options.h"
-#include "glog/logging.h"
+// #include "glog/logging.h"
 
 // CUDA
 #ifdef __INTELLISENSE__
@@ -10,9 +10,10 @@
 #include <cuda_runtime.h>
 #include <jetson-utils/cudaMappedMemory.h>
 #include "motion_compensation.h"
-#include "reduce.h"
+// #include "reduce.h"
+// #include <cblas.h>
 // #include "mc_functor.h"
-#include "mc_gradient.h"
+// #include "mc_gradient.h"
 #include "mc_gradient_bilinear.h"
 // #include "mc_leastsquares.h"
 
@@ -22,12 +23,17 @@
 
 #include <opencv2/opencv.hpp>
 #include <opencv2/core.hpp>
-#include <opencv2/imgcodecs.hpp>
-#include <opencv2/highgui/highgui.hpp>
+// #include <opencv2/imgcodecs.hpp>
+// #include <opencv2/highgui/highgui.hpp>
 #include <nvtx3/nvtx3.hpp>
 
 int main(int argc, char **argv)
 {
+    
+    // cv::Mat mat2;
+    // uint8_t output_image1[height*width];
+    // cv::Mat mat1(height, width, CV_8U, output_image1);
+    // openblas_set_num_threads(1);
     cudaSetDeviceFlags(cudaDeviceScheduleSpin);
     // cudaSetDeviceFlags(cudaDeviceScheduleYield);
     // cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync);
@@ -53,6 +59,7 @@ int main(int argc, char **argv)
     std::string line;
     std::vector<float> t, x, y;
     int event_num = 0;
+    
     for (int i = 0; i < total_event_num; i++)
     {
         std::getline(events_str, line);
@@ -115,10 +122,8 @@ int main(int argc, char **argv)
     //     {
     //         for (auto nonlinear_conjugate_gradient_type : nonlinear_conjugate_gradient_types)
     //         {
-    int use_middle_ts = 1;
     // for (int use_middle_ts = 0; use_middle_ts < 2; use_middle_ts++)
     // {
-    bool split_func = 0;
 
     ceres::LineSearchDirectionType line_search_direction_type = ceres::LBFGS;
     ceres::LineSearchType line_search_type = ceres::WOLFE;
@@ -126,7 +131,7 @@ int main(int argc, char **argv)
     float total_time_ms = 0;
 
     std::stringstream run_name;
-    run_name << line_search_direction_type << " " << line_search_type << " " << nonlinear_conjugate_gradient_type << " " << (use_middle_ts ? "middle_ts" : "start_ts") << " " << (split_func ? "split" : "merged");
+    run_name << line_search_direction_type << " " << line_search_type << " " << nonlinear_conjugate_gradient_type;
     std::cout << run_name.str() << std::endl;
     for (int i = 0; i < 100; i++)
     {
@@ -135,7 +140,7 @@ int main(int argc, char **argv)
         assert(rotations[2] == initial_rotations[2]);
 
         // McGradient *mc_gr = new McGradient(fx, fy, cx, cy, x, y, t, height, width, event_num, use_middle_ts);
-        McGradientBilinear *mc_gr = new McGradientBilinear(fx, fy, cx, cy, x, y, t, height, width, event_num, use_middle_ts, split_func, integrate_reduction);
+        McGradientBilinear *mc_gr = new McGradientBilinear(fx, fy, cx, cy, x, y, t, height, width, event_num);
         ceres::GradientProblem problem(mc_gr);
         ceres::GradientProblemSolver::Options options;
         // STEEPEST_DESCENT, NONLINEAR_CONJUGATE_GRADIENT, BFGS and LBFGS.
@@ -153,6 +158,7 @@ int main(int argc, char **argv)
 
         ceres::Solve(options, problem, rotations, &summary);
         cudaDeviceSynchronize();
+        
         if (i == 10 - 1)
         {
             std::cout << summary.FullReport() << "\n";

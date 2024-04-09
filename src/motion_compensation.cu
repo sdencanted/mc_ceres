@@ -201,6 +201,7 @@ void fillImageBilinearIntrinsics(float fx, float fy, float cx, float cy, int hei
     fillImageBilinearIntrinsics_<<<gridSize, blockSize>>>(fx, fy, cx, cy, height, width, num_events, x_unprojected, y_unprojected, x_prime, y_prime, t, image, rotation_x, rotation_y, rotation_z, do_jacobian, image_del_x, image_del_y, image_del_z);
 }
 
+
 __global__ void fillImageBilinear_(float fx, float fy, float cx, float cy, int height, int width, int num_events, float *x_unprojected, float *y_unprojected, float *x_prime, float *y_prime, float *t, float *image, const float rotation_x, const float rotation_y, const float rotation_z, bool do_jacobian, float *image_del_x, float *image_del_y, float *image_del_z)
 {
 
@@ -237,61 +238,69 @@ __global__ void fillImageBilinear_(float fx, float fy, float cx, float cy, int h
             int idx4 = x_trunc + (y_trunc)*width;
             float x_diff = x_prime[i] - x_trunc;
             float y_diff = y_prime[i] - y_trunc;
-            atomicAdd(&image[idx1], (1 - x_diff) * (1 - y_diff));
-            atomicAdd(&image[idx2], (x_diff) * (1 - y_diff));
-            atomicAdd(&image[idx3], (1 - x_diff) * (y_diff));
-            atomicAdd(&image[idx4], (x_diff) * (y_diff));
-            if (do_jacobian)
-            {
-                float del_x_del_theta_x, del_x_del_theta_y, del_x_del_theta_z, del_y_del_theta_x, del_y_del_theta_y, del_y_del_theta_z;
-                float fx_div_z_rotated = fx * z_rotated_inv;
-                float fy_div_z_rotated = fy * z_rotated_inv;
-                del_x_del_theta_y = fx_div_z_rotated * t[i] * (1 + x_unprojected[i] * x_rotated_norm);
-                del_x_del_theta_z = fx_div_z_rotated * (-t[i] * y_unprojected[i]);
-                del_x_del_theta_x = del_x_del_theta_z * x_rotated_norm;
-                del_y_del_theta_x = fy_div_z_rotated * t[i] * (-1 - y_unprojected[i] * y_rotated_norm);
-                del_y_del_theta_z = fy_div_z_rotated * (t[i] * x_unprojected[i]);
-                del_y_del_theta_y = del_y_del_theta_z * y_rotated_norm;
-                float d1x = -(1 - y_diff);
-                float d1y = -(1 - x_diff);
-                float d2x = 1 - y_diff;
-                float d2y = -x_diff;
-                float d3x = -y_diff;
-                float d3y = 1 - x_diff;
-                float d4x = y_diff;
-                float d4y = x_diff;
+            float del_x_del_theta_x, del_x_del_theta_y, del_x_del_theta_z, del_y_del_theta_x, del_y_del_theta_y, del_y_del_theta_z;
+            float fx_div_z_rotated = fx * z_rotated_inv;
+            float fy_div_z_rotated = fy * z_rotated_inv;
+            del_x_del_theta_y = fx_div_z_rotated * t[i] * (1 + x_unprojected[i] * x_rotated_norm);
+            del_x_del_theta_z = fx_div_z_rotated * (-t[i] * y_unprojected[i]);
+            del_x_del_theta_x = del_x_del_theta_z * x_rotated_norm;
+            del_y_del_theta_x = fy_div_z_rotated * t[i] * (-1 - y_unprojected[i] * y_rotated_norm);
+            del_y_del_theta_z = fy_div_z_rotated * (t[i] * x_unprojected[i]);
+            del_y_del_theta_y = del_y_del_theta_z * y_rotated_norm;
+            // float d1x = -(1 - y_diff);
+            // float d1y = -(1 - x_diff);
+            float d2x = 1 - y_diff;
+            float d2y = -x_diff;
+            float d3x = -y_diff;
+            float d3y = 1 - x_diff;
+            float d4x = y_diff;
+            float d4y = x_diff;
 
-                float dx1 = d1x * del_x_del_theta_x + d1y * del_y_del_theta_x;
-                float dx2 = d2x * del_x_del_theta_x + d2y * del_y_del_theta_x;
-                float dx3 = d3x * del_x_del_theta_x + d3y * del_y_del_theta_x;
-                float dx4 = d4x * del_x_del_theta_x + d4y * del_y_del_theta_x;
+            float d1x = -d2x;
+            float d1y = -d3y;
 
-                float dy1 = d1x * del_x_del_theta_y + d1y * del_y_del_theta_y;
-                float dy2 = d2x * del_x_del_theta_y + d2y * del_y_del_theta_y;
-                float dy3 = d3x * del_x_del_theta_y + d3y * del_y_del_theta_y;
-                float dy4 = d4x * del_x_del_theta_y + d4y * del_y_del_theta_y;
+            // float im1 = (1 - x_diff) * (1 - y_diff);
+            float im1 = d3y * d2x;
+            // float im2 = (x_diff) * (1 - y_diff);
+            float im2 = d4y * d2x;
+            // float im3 = (1 - x_diff) * (y_diff);
+            float im3 = d3y * y_diff;
+            float im4 = (x_diff) * (y_diff);
 
-                float dz1 = d1x * del_x_del_theta_z + d1y * del_y_del_theta_z;
-                float dz2 = d2x * del_x_del_theta_z + d2y * del_y_del_theta_z;
-                float dz3 = d3x * del_x_del_theta_z + d3y * del_y_del_theta_z;
-                float dz4 = d4x * del_x_del_theta_z + d4y * del_y_del_theta_z;
+            float dx1 = d1x * del_x_del_theta_x + d1y * del_y_del_theta_x;
+            float dx2 = d2x * del_x_del_theta_x + d2y * del_y_del_theta_x;
+            float dx3 = d3x * del_x_del_theta_x + d3y * del_y_del_theta_x;
+            float dx4 = d4x * del_x_del_theta_x + d4y * del_y_del_theta_x;
 
-                atomicAdd(&image_del_x[idx1], dx1);
-                atomicAdd(&image_del_y[idx1], dy1);
-                atomicAdd(&image_del_z[idx1], dz1);
+            float dy1 = d1x * del_x_del_theta_y + d1y * del_y_del_theta_y;
+            float dy2 = d2x * del_x_del_theta_y + d2y * del_y_del_theta_y;
+            float dy3 = d3x * del_x_del_theta_y + d3y * del_y_del_theta_y;
+            float dy4 = d4x * del_x_del_theta_y + d4y * del_y_del_theta_y;
 
-                atomicAdd(&image_del_x[idx2], dx2);
-                atomicAdd(&image_del_y[idx2], dy2);
-                atomicAdd(&image_del_z[idx2], dz2);
+            float dz1 = d1x * del_x_del_theta_z + d1y * del_y_del_theta_z;
+            float dz2 = d2x * del_x_del_theta_z + d2y * del_y_del_theta_z;
+            float dz3 = d3x * del_x_del_theta_z + d3y * del_y_del_theta_z;
+            float dz4 = d4x * del_x_del_theta_z + d4y * del_y_del_theta_z;
 
-                atomicAdd(&image_del_x[idx3], dx3);
-                atomicAdd(&image_del_y[idx3], dy3);
-                atomicAdd(&image_del_z[idx3], dz3);
+            atomicAdd(&image[idx1], im1);
+            atomicAdd(&image[idx2], im2);
+            atomicAdd(&image[idx3], im3);
+            atomicAdd(&image[idx4], im4);
 
-                atomicAdd(&image_del_x[idx4], dx4);
-                atomicAdd(&image_del_y[idx4], dy4);
-                atomicAdd(&image_del_z[idx4], dz4);
-            }
+            atomicAdd(&image_del_x[idx1], dx1);
+            atomicAdd(&image_del_x[idx2], dx2);
+            atomicAdd(&image_del_x[idx3], dx3);
+            atomicAdd(&image_del_x[idx4], dx4);
+
+            atomicAdd(&image_del_y[idx1], dy1);
+            atomicAdd(&image_del_y[idx2], dy2);
+            atomicAdd(&image_del_y[idx3], dy3);
+            atomicAdd(&image_del_y[idx4], dy4);
+
+            atomicAdd(&image_del_z[idx4], dz4);
+            atomicAdd(&image_del_z[idx3], dz3);
+            atomicAdd(&image_del_z[idx1], dz1);
+            atomicAdd(&image_del_z[idx2], dz2);
         }
     }
 }
@@ -1452,9 +1461,12 @@ void getContrastDelBatchReduce(float *image, float *image_del_theta_x, float *im
 
     int num_el = height * width;
     image_contrast[0] = -contrast_block_sum_cpu[0] / num_el;
-    image_del_theta_contrast[0] = -2 * contrast_block_sum_cpu[1] / num_el;
-    image_del_theta_contrast[1] = -2 * contrast_block_sum_cpu[2] / num_el;
-    image_del_theta_contrast[2] = -2 * contrast_block_sum_cpu[3] / num_el;
+    if (image_del_theta_contrast != nullptr)
+    {
+        image_del_theta_contrast[0] = -2 * contrast_block_sum_cpu[1] / num_el;
+        image_del_theta_contrast[1] = -2 * contrast_block_sum_cpu[2] / num_el;
+        image_del_theta_contrast[2] = -2 * contrast_block_sum_cpu[3] / num_el;
+    }
 
     // checkCudaErrors(cudaFree(contrast_block_sum));
     // checkCudaErrors(cudaFree(contrast_del_x_block_sum));

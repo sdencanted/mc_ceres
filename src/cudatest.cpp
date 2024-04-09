@@ -1,3 +1,4 @@
+#include "mc_gradient_bilinear.h"
 #include "motion_compensation.h"
 // CUDA
 #ifdef __INTELLISENSE__
@@ -16,14 +17,24 @@
 #include <nvtx3/nvtx3.hpp>
 #include <chrono>
 
+// #include <opencv2/opencv.hpp>
+// #include <opencv2/core.hpp>
+// #include <opencv2/imgcodecs.hpp>
+// #include <opencv2/highgui/highgui.hpp>
 
 int main(int argc, char **argv){
     cudaSetDeviceFlags(cudaDeviceScheduleSpin);
+    std::vector<float> x={1};
+    std::vector<float> y={1};
+    std::vector<float> t={1};
+    McGradientBilinear *mc_gr = new McGradientBilinear(0, 0,0, 0, x, y, t, 1,1,1);
+    ceres::GradientProblem problem(mc_gr);
     // cudaSetDeviceFlags(cudaDeviceScheduleYield);
     // cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync);
     float* image_,*image_del_theta_x_,*image_del_theta_y_,*image_del_theta_z_;
     double residuals[3],gradient[3];
     int height_=180,width_=240;
+    
     cudaMalloc(&image_, height_*width_ * sizeof(float));
     cudaMalloc(&image_del_theta_x_, height_*width_ * sizeof(float));
     cudaMalloc(&image_del_theta_y_, height_*width_* sizeof(float));
@@ -60,6 +71,7 @@ int main(int argc, char **argv){
     uint64_t ms = duration_cast< milliseconds >(
         system_clock::now().time_since_epoch()
     ).count();    
+    
     for(int i=0;i<100;i++){
         nvtx3::scoped_range r{"batch reduce"};
         std::fill_n(residuals,3,0);
@@ -87,6 +99,9 @@ int main(int argc, char **argv){
         getContrastDelBatchReduce(image_, image_del_theta_x_, image_del_theta_y_, image_del_theta_z_, residuals, gradient, height_, width_,contrast_block_sum,contrast_del_x_block_sum,contrast_del_y_block_sum,contrast_del_z_block_sum,means,contrast_block_sum_cpu);
         nvtxRangePop(); // Ends NVTX range
         std::cout<<gradient[0]<<" "<<gradient[1]<<" "<<gradient[2]<<" "<<residuals[0]<<std::endl;
+        
+        uint8_t output_image[height_*width_];
+        // cv::Mat mat(height_, width_, CV_8U, output_image);
     }
     cudaFree(image_);
     cudaFree(image_del_theta_x_);

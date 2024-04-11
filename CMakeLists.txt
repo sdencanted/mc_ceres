@@ -69,6 +69,16 @@ include_directories(${OpenCV_INCLUDE_DIRS})
 message(STATUS "Find opencv include at ${OpenCV_INCLUDE_DIRS}")
 message(STATUS "Find opencv libraries: ${OpenCV_LIBRARIES}")
 
+# OpenMP
+find_package(OpenMP REQUIRED)
+if(OPENMP_FOUND)
+  message(STATUS "OPENMP FOUND")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
+else()
+  message(STATUS "OPENMP NOT FOUND")
+endif()
+
+
 # GSL
 find_package(GSL REQUIRED)
 
@@ -87,6 +97,7 @@ target_link_libraries(main
     jetson-utils
     ${OpenCV_LIBS}
     nvtx3-cpp
+    ${OpenMP_LIBS}
 )
 
 # main gsl

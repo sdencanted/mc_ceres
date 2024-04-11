@@ -21,6 +21,7 @@
 #include <nvtx3/nvtx3.hpp>
 #include <pthread.h>
 #include <sys/resource.h>
+#include <omp.h>
 // A CostFunction implementing motion compensation then calculating contrast, as well as the jacobian.
 class McGradientBilinear final : public ceres::FirstOrderFunction
 {
@@ -30,14 +31,14 @@ public:
     {
         cudaFree(x_unprojected_);
         cudaFree(y_unprojected_);
-        cudaFree(x_prime_);
-        cudaFree(y_prime_);
-        // cudaFree(bilinear_values_);
+        cudaFreeHost(x_prime_);
+        cudaFreeHost(y_prime_);
+        cudaFreeHost(bilinear_values_);
         cudaFree(t_);
-        cudaFree(image_);
-        cudaFree(image_del_theta_x_);
-        cudaFree(image_del_theta_y_);
-        cudaFree(image_del_theta_z_);
+        cudaFreeHost(image_);
+        cudaFreeHost(image_del_theta_x_);
+        cudaFreeHost(image_del_theta_y_);
+        cudaFreeHost(image_del_theta_z_);
 
         checkCudaErrors(cudaFree(contrast_block_sum_));
         checkCudaErrors(cudaFree(contrast_del_x_block_sum_));
@@ -52,13 +53,14 @@ public:
         // create pinned memory for x,y,t,image,image dels
         cudaMallocHost(&x_unprojected_, num_events_ * sizeof(float));
         cudaMallocHost(&y_unprojected_, num_events_ * sizeof(float));
-        cudaMalloc(&x_prime_, num_events_ * sizeof(float));
-        cudaMalloc(&y_prime_, num_events_ * sizeof(float));
+        cudaMallocHost(&x_prime_, num_events_ * sizeof(float));
+        cudaMallocHost(&y_prime_, num_events_ * sizeof(float));
+        cudaMallocHost(&bilinear_values_, num_events_ * sizeof(float) * 16);
         cudaMallocHost(&t_, num_events_ * sizeof(float));
-        cudaMalloc(&image_, (height_) * (width_) * sizeof(float));
-        cudaMalloc(&image_del_theta_x_, (height_) * (width_) * sizeof(float));
-        cudaMalloc(&image_del_theta_y_, (height_) * (width_) * sizeof(float));
-        cudaMalloc(&image_del_theta_z_, (height_) * (width_) * sizeof(float));
+        cudaMallocHost(&image_, (height_) * (width_) * sizeof(float));
+        cudaMallocHost(&image_del_theta_x_, (height_) * (width_) * sizeof(float));
+        cudaMallocHost(&image_del_theta_y_, (height_) * (width_) * sizeof(float));
+        cudaMallocHost(&image_del_theta_z_, (height_) * (width_) * sizeof(float));
 
         cudaMemsetAsync(image_, 0, (height_) * (width_) * sizeof(float));
         cudaMemsetAsync(image_del_theta_x_, 0, (height_) * (width_) * sizeof(float));
@@ -105,23 +107,23 @@ public:
             std::cout << "could not allocate cuda mem for " << ptr_name << std::endl;
         }
     }
-    void ReplaceData(std::vector<float> &x, std::vector<float> &y, std::vector<float> &t,const int num_events){
-        num_events_=num_events;
-        
+    void ReplaceData(std::vector<float> &x, std::vector<float> &y, std::vector<float> &t, const int num_events)
+    {
+        num_events_ = num_events;
+
         cudaFree(x_unprojected_);
         cudaFree(y_unprojected_);
-        cudaFree(x_prime_);
-        cudaFree(y_prime_);
+        cudaFreeHost(x_prime_);
+        cudaFreeHost(y_prime_);
+        cudaFreeHost(bilinear_values_);
         cudaFree(t_);
 
-        
         cudaMalloc(&x_unprojected_, num_events_ * sizeof(float));
         cudaMalloc(&y_unprojected_, num_events_ * sizeof(float));
-        cudaMalloc(&x_prime_, num_events_ * sizeof(float));
-        cudaMalloc(&y_prime_, num_events_ * sizeof(float));
+        cudaMallocHost(&x_prime_, num_events_ * sizeof(float));
+        cudaMallocHost(&y_prime_, num_events_ * sizeof(float));
+        cudaMallocHost(&bilinear_values_, num_events_ * sizeof(float) * 16);
         cudaMalloc(&t_, num_events_ * sizeof(float));
-
-
     }
     bool Evaluate(const double *const parameters,
                   double *residuals,
@@ -137,26 +139,74 @@ public:
         // std::cout<<do_jacobian<<std::endl;
         // Populate image
 
-        fillImageBilinear(fx_, fy_, cx_, cy_, height_, width_, num_events_, x_unprojected_, y_unprojected_, x_prime_, y_prime_, t_, image_, parameters[0], parameters[1], parameters[2], do_jacobian, image_del_theta_x_, image_del_theta_y_, image_del_theta_z_);
-        
+        // fillImageBilinear(fx_, fy_, cx_, cy_, height_, width_, num_events_, x_unprojected_, y_unprojected_, x_prime_, y_prime_, t_, image_, parameters[0], parameters[1], parameters[2], do_jacobian, image_del_theta_x_, image_del_theta_y_, image_del_theta_z_);
+        motionCompensateBilinear(fx_, fy_, cx_, cy_, height_, width_, num_events_, x_unprojected_, y_unprojected_, x_prime_, y_prime_, t_, parameters[0], parameters[1], parameters[2], bilinear_values_);
         // fillImageBilinearIntrinsics(fx_, fy_, cx_, cy_, height_, width_, num_events_, x_unprojected_, y_unprojected_, x_prime_, y_prime_, t_, image_, parameters[0], parameters[1], parameters[2], do_jacobian, image_del_theta_x_, image_del_theta_y_, image_del_theta_z_);
-        
+        cudaDeviceSynchronize();
+
+        //  queue a thread to calculate mean while we accumulate the image
+        meanBilinear(bilinear_values_, num_events_, means_, contrast_block_sum_, contrast_del_x_block_sum_, contrast_del_y_block_sum_, contrast_del_z_block_sum_, height_, width_);
+// Potentially OMP
+// definitely ARM vector add
+
+        nvtxRangePushA("OMP"); // Begins NVTX range
+#pragma omp parallel num_threads(4) // Orin NX has 8 threads, use 4 for 4 different images
+        {
+            int image_id = omp_get_thread_num();
+            int offset = image_id * num_events_ * 4;
+            float *image_target = NULL;
+            switch (image_id)
+            {
+            case 0:
+                image_target = image_;
+                break;
+            case 1:
+                image_target = image_del_theta_x_;
+                break;
+            case 2:
+                image_target = image_del_theta_y_;
+                break;
+            case 3:
+                image_target = image_del_theta_z_;
+                break;
+            }
+            for (int i = 0; i < num_events_; i++)
+            {
+                int x = x_prime_[i];
+                int y = y_prime_[i];
+                // if (x >= 1 && x <= width_ - 2 && y >= 1 && y <= height_ - 2)
+                if(x_prime_[i]>0)
+                {
+                    image_target[x+width_]++;
+                // //     int idx4 = x +width_* y;
+                // //     int idx3 = idx4 - 1;
+                // //     int idx1 = idx3 - width_;
+                //     const float32x2_t v1 = vld1_f32(bilinear_values_ + i + offset);
+                //     const float32x2_t v2 = vld1_f32(bilinear_values_ + i + offset + width_);
+
+                //     // const float32x2_t im1 = vld1_f32(image_target + idx1);
+                //     // const float32x2_t im2 = vld1_f32(image_target + idx3);
+                //     const float32x2_t im1 = vld1_f32(image_target);
+                //     const float32x2_t im2 = vld1_f32(image_target);
+                //     // float32x2_t sum = vadd_f32(v1, im1);
+                //     // vst1_f32(image_target + idx1, sum);
+                //     // sum = vadd_f32(v2, im2);
+                //     // vst1_f32(image_target + idx3, sum);
+                //     float32x2_t sum = vadd_f32(v1, im1);
+                //     vst1_f32(image_target , sum);
+                //     sum = vadd_f32(v2, im2);
+                //     vst1_f32(image_target , sum);
+                }
+            }
+        }
+        nvtxRangePop();
 
         // Calculate contrast and if needed jacobian
 
         // nvtxRangePushA("contrast"); // Begins NVTX range
-        
+
         getContrastDelBatchReduce(image_, image_del_theta_x_, image_del_theta_y_, image_del_theta_z_, residuals, gradient, height_, width_,
-                                    contrast_block_sum_, contrast_del_x_block_sum_, contrast_del_y_block_sum_, contrast_del_z_block_sum_, means_, contrast_block_sum_cpu_);
-        // if (do_jacobian)
-        // {
-        //     getContrastDelBatchReduce(image_, image_del_theta_x_, image_del_theta_y_, image_del_theta_z_, residuals, gradient, height_, width_,
-        //                               contrast_block_sum_, contrast_del_x_block_sum_, contrast_del_y_block_sum_, contrast_del_z_block_sum_, means_, contrast_block_sum_cpu_);
-        // }
-        // else
-        // {
-        //     residuals[0] = -getContrast(image_, height_, width_, cub_temp_size_);
-        // }
+                                  contrast_block_sum_, contrast_del_x_block_sum_, contrast_del_y_block_sum_, contrast_del_z_block_sum_, means_, contrast_block_sum_cpu_);
         cudaMemsetAsync(image_, 0, (height_) * (width_) * sizeof(float));
         cudaMemsetAsync(image_del_theta_x_, 0, (height_) * (width_) * sizeof(float));
         cudaMemsetAsync(image_del_theta_y_, 0, (height_) * (width_) * sizeof(float));
@@ -186,7 +236,7 @@ public:
     int f_count = 0;
     int g_count = 0;
 
-private:
+// private:
     float *x_unprojected_ = NULL;
     float *y_unprojected_ = NULL;
     float *x_prime_ = NULL;

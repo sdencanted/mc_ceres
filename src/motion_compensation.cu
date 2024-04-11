@@ -435,6 +435,118 @@ void fillImageBilinearSeparate(float fx, float fy, float cx, float cy, int heigh
     checkCudaErrors(cudaFree(x_rotated_norm));
     checkCudaErrors(cudaFree(y_rotated_norm));
 }
+
+__global__ void motionCompensateBilinear_(float fx, float fy, float cx, float cy, int height, int width, int num_events, float *x_unprojected, float *y_unprojected, float *x_prime, float *y_prime, float *t, const float rotation_x, const float rotation_y, const float rotation_z, float *bilinear_values)
+{
+
+    size_t thread_grid_idx = size_t(blockIdx.x * blockDim.x + threadIdx.x);
+    size_t num_threads_in_grid = size_t(blockDim.x * gridDim.x);
+
+    for (size_t i = thread_grid_idx; i < num_events; i += num_threads_in_grid)
+    {
+        // calculate theta x,y,z
+        float theta_x_t = rotation_x * t[i];
+        float theta_y_t = rotation_y * t[i];
+        float theta_z_t = rotation_z * t[i];
+
+        // calculate x/y/z_rotated
+        float z_rotated_inv = 1 / (-theta_y_t * x_unprojected[i] + theta_x_t * y_unprojected[i] + 1);
+        float x_rotated_norm = (x_unprojected[i] - theta_z_t * y_unprojected[i] + theta_y_t) * z_rotated_inv;
+        float y_rotated_norm = (theta_z_t * x_unprojected[i] + y_unprojected[i] - theta_x_t) * z_rotated_inv;
+
+        // calculate x_prime and y_prime
+        x_prime[i] = fx * x_rotated_norm + cx;
+        y_prime[i] = fy * y_rotated_norm + cy;
+
+        // populate image
+
+        // Bilinear
+        int x_trunc = int(x_prime[i]);
+        int y_trunc = int(y_prime[i]);
+        if (x_trunc >= 1 && x_trunc <= width - 2 && y_trunc >= 1 && y_trunc <= height - 2)
+        {
+            float x_diff = x_prime[i] - x_trunc;
+            float y_diff = y_prime[i] - y_trunc;
+            float del_x_del_theta_x, del_x_del_theta_y, del_x_del_theta_z, del_y_del_theta_x, del_y_del_theta_y, del_y_del_theta_z;
+            float fx_div_z_rotated_ti = fx * z_rotated_inv * t[i];
+            float fy_div_z_rotated_ti = fy * z_rotated_inv * t[i];
+            del_x_del_theta_y = fx_div_z_rotated_ti * (1 + x_unprojected[i] * x_rotated_norm);
+            del_x_del_theta_z = fx_div_z_rotated_ti * -y_unprojected[i];
+            del_x_del_theta_x = del_x_del_theta_z * x_rotated_norm;
+            del_y_del_theta_x = fy_div_z_rotated_ti * (-1 - y_unprojected[i] * y_rotated_norm);
+            del_y_del_theta_z = fy_div_z_rotated_ti * x_unprojected[i];
+            del_y_del_theta_y = del_y_del_theta_z * y_rotated_norm;
+            // float d1x = -(1 - y_diff);
+            // float d1y = -(1 - x_diff);
+            float d2x = 1 - y_diff;
+            float d2y = -x_diff;
+            float d3x = -y_diff;
+            float d3y = 1 - x_diff;
+            float d4x = y_diff;
+            float d4y = x_diff;
+
+            float d1x = -d2x;
+            float d1y = -d3y;
+
+            // float im1 = (1 - x_diff) * (1 - y_diff);
+            float im1 = d3y * d2x;
+            // float im2 = (x_diff) * (1 - y_diff);
+            float im2 = d4y * d2x;
+            // float im3 = (1 - x_diff) * (y_diff);
+            float im3 = d3y * y_diff;
+            float im4 = (x_diff) * (y_diff);
+
+            float dx1 = d1x * del_x_del_theta_x + d1y * del_y_del_theta_x;
+            float dx2 = d2x * del_x_del_theta_x + d2y * del_y_del_theta_x;
+            float dx3 = d3x * del_x_del_theta_x + d3y * del_y_del_theta_x;
+            float dx4 = d4x * del_x_del_theta_x + d4y * del_y_del_theta_x;
+            float dy1 = d1x * del_x_del_theta_y + d1y * del_y_del_theta_y;
+            float dy2 = d2x * del_x_del_theta_y + d2y * del_y_del_theta_y;
+            float dy3 = d3x * del_x_del_theta_y + d3y * del_y_del_theta_y;
+            float dy4 = d4x * del_x_del_theta_y + d4y * del_y_del_theta_y;
+            float dz1 = d1x * del_x_del_theta_z + d1y * del_y_del_theta_z;
+            float dz2 = d2x * del_x_del_theta_z + d2y * del_y_del_theta_z;
+            float dz3 = d3x * del_x_del_theta_z + d3y * del_y_del_theta_z;
+            float dz4 = d4x * del_x_del_theta_z + d4y * del_y_del_theta_z;
+            bilinear_values[i] = d3y * d2x;
+            bilinear_values[i + 1] = d4y * d2x;
+            bilinear_values[i + 2] = d3y * y_diff;
+            bilinear_values[i + 3] = (x_diff) * (y_diff);
+
+            bilinear_values[i + num_events * 4] = d1x * del_x_del_theta_x + d1y * del_y_del_theta_x;
+            bilinear_values[i + num_events * 4 + 1] = d2x * del_x_del_theta_x + d2y * del_y_del_theta_x;
+            bilinear_values[i + num_events * 4 + 2] = d3x * del_x_del_theta_x + d3y * del_y_del_theta_x;
+            bilinear_values[i + num_events * 4 + 3] = d4x * del_x_del_theta_x + d4y * del_y_del_theta_x;
+
+            bilinear_values[i + num_events * 8] = d1x * del_x_del_theta_y + d1y * del_y_del_theta_y;
+            bilinear_values[i + num_events * 8 + 1] = d2x * del_x_del_theta_y + d2y * del_y_del_theta_y;
+            bilinear_values[i + num_events * 8 + 2] = d3x * del_x_del_theta_y + d3y * del_y_del_theta_y;
+            bilinear_values[i + num_events * 8 + 3] = d4x * del_x_del_theta_y + d4y * del_y_del_theta_y;
+
+            bilinear_values[i+ num_events * 12] = d1x * del_x_del_theta_z + d1y * del_y_del_theta_z;
+            bilinear_values[i + num_events * 12 + 1] = d2x * del_x_del_theta_z + d2y * del_y_del_theta_z;
+            bilinear_values[i + num_events * 12 + 2] = d3x * del_x_del_theta_z + d3y * del_y_del_theta_z;
+            bilinear_values[i + num_events * 12 + 3] = d4x * del_x_del_theta_z + d4y * del_y_del_theta_z;
+        }
+        // else
+        // {
+        //     bilinear_values[idx] = __int_as_float(0xFFE00000); // NaN
+        // }
+    }
+}
+void motionCompensateBilinear(float fx, float fy, float cx, float cy, int height, int width, int num_events, float *x_unprojected, float *y_unprojected, float *x_prime, float *y_prime, float *t, const float rotation_x, const float rotation_y, const float rotation_z, float *bilinear_values)
+{
+    int blockSize;   // The launch configurator returned block size
+    int minGridSize; // The minimum grid size needed to achieve the
+                     // maximum occupancy for a full device launch
+    int gridSize;    // The actual grid size needed, based on input size
+
+    cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize,
+                                       motionCompensateBilinear_, 0, 0);
+    // Round up according to array size
+    gridSize = (num_events + blockSize - 1) / blockSize;
+    motionCompensateBilinear_<<<gridSize, blockSize>>>(fx, fy, cx, cy, height, width, num_events, x_unprojected, y_unprojected, x_prime, y_prime, t, rotation_x, rotation_y, rotation_z, bilinear_values);
+}
 __global__ void fillImageKronecker_(int height, int width, int num_events, float *x_prime, float *y_prime, float *image)
 {
 
@@ -1205,19 +1317,18 @@ __global__ void meanPt1_(float *image, float *image_del_theta_x, float *image_de
 }
 
 // 4 blocks 128 threads
-__global__ void meanPt2_(float *contrast_block_sum, float *contrast_del_x_block_sum, float *contrast_del_y_block_sum, float *contrast_del_z_block_sum, int num_elements, float *means)
+__global__ void meanPt2_(float *contrast_block_sum, float *contrast_del_x_block_sum, float *contrast_del_y_block_sum, float *contrast_del_z_block_sum, int num_elements, float *means, int prev_grid_dim)
 {
     float *sdata = SharedMemory<float>();
     float temp_sum;
     uint16_t tid = threadIdx.x;
-    // 85 partial sums to go
     // dump partial sums inside again
-    if (tid < 85)
+    if (tid < prev_grid_dim)
     {
 
         if (blockIdx.x == 0)
         {
-            temp_sum = temp_sum = contrast_block_sum[tid];
+            temp_sum = contrast_block_sum[tid];
         }
         else if (blockIdx.x == 1)
         {
@@ -1272,7 +1383,6 @@ __global__ void meanPt2_(float *contrast_block_sum, float *contrast_del_x_block_
         }
     }
 }
-
 void getContrastDelBatchReduce(float *image, float *image_del_theta_x, float *image_del_theta_y, float *image_del_theta_z,
                                double *image_contrast, double *image_del_theta_contrast,
                                int height, int width, int cub_temp_size)
@@ -1430,22 +1540,9 @@ void getContrastDelBatchReduce(float *image, float *image_del_theta_x, float *im
 
     int smemSize = (blockSize <= 32) ? 2 * blockSize * sizeof(float) : blockSize * sizeof(float);
 
-    // float *contrast_block_sum;
-    // float *contrast_del_x_block_sum;
-    // float *contrast_del_y_block_sum;
-    // float *contrast_del_z_block_sum;
-    // float *means;
-    // float *contrast_block_sum_cpu;
+    // meanPt1_<<<gridSize, blockSize, smemSize>>>(image, image_del_theta_x, image_del_theta_y, image_del_theta_z, height * width, contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum);
 
-    // checkCudaErrors(cudaMalloc((void **)&contrast_block_sum, gridSize * sizeof(float)));
-    // checkCudaErrors(cudaMalloc((void **)&contrast_del_x_block_sum, gridSize * sizeof(float)));
-    // checkCudaErrors(cudaMalloc((void **)&contrast_del_y_block_sum, gridSize * sizeof(float)));
-    // checkCudaErrors(cudaMalloc((void **)&contrast_del_z_block_sum, gridSize * sizeof(float)));
-    // checkCudaErrors(cudaMalloc(&means, 4 * sizeof(float)));
-    // checkCudaErrors(cudaMallocHost(&contrast_block_sum_cpu, sizeof(float) * 4));
-    meanPt1_<<<gridSize, blockSize, smemSize>>>(image, image_del_theta_x, image_del_theta_y, image_del_theta_z, height * width, contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum);
-
-    meanPt2_<<<4, 128, 128 * sizeof(float)>>>(contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum, height * width, means);
+    // meanPt2_<<<4, 128, 128 * sizeof(float)>>>(contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum, height * width, means,gridSize);
 
     getContrastDelBatchReduceHarder_<<<gridSize, blockSize, smemSize>>>(image, image_del_theta_x, image_del_theta_y, image_del_theta_z, height * width, means, contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum);
 
@@ -1462,14 +1559,26 @@ void getContrastDelBatchReduce(float *image, float *image_del_theta_x, float *im
         image_del_theta_contrast[2] = -2 * contrast_block_sum_cpu[3] / num_el;
     }
 
-    // checkCudaErrors(cudaFree(contrast_block_sum));
-    // checkCudaErrors(cudaFree(contrast_del_x_block_sum));
-    // checkCudaErrors(cudaFree(contrast_del_y_block_sum));
-    // checkCudaErrors(cudaFree(contrast_del_z_block_sum));
-    // checkCudaErrors(cudaFreeHost(contrast_block_sum_cpu));
-    // checkCudaErrors(cudaFree(means));
 }
 
+void meanBilinear(float*bilinear_values, int num_events,float*means,
+                               float *contrast_block_sum,
+                               float *contrast_del_x_block_sum,
+                               float *contrast_del_y_block_sum,
+                               float *contrast_del_z_block_sum,
+                               int height,int width){
+    
+    int blockSize = 512; // The launch configurator returned block size
+    int gridSize = (num_events + blockSize - 1) / blockSize;  // The actual grid size needed, based on input size
+    
+    // int gridSize = 85;   // The actual grid size needed, based on input size
+
+    int smemSize = (blockSize <= 32) ? 2 * blockSize * sizeof(float) : blockSize * sizeof(float);
+    meanPt1_<<<gridSize, blockSize, smemSize>>>(bilinear_values,bilinear_values+num_events*4,bilinear_values+num_events*8,bilinear_values+num_events*12, num_events, contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum);
+
+    meanPt2_<<<4, 128, 128 * sizeof(float)>>>(contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum, height * width, means,gridSize);
+
+}
 __device__ float getRandom(uint64_t seed, int tid, int threadCallCount)
 {
     curandState s;

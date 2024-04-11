@@ -158,7 +158,11 @@ int main(int argc, char **argv)
 
         ceres::Solve(options, problem, rotations, &summary);
         cudaDeviceSynchronize();
-        
+        // float means[4];
+        // cudaMemcpy(means,mc_gr->means_,4*sizeof(float),cudaMemcpyDeviceToHost);
+        // for(int i=0;i<4;i++){
+        //     std::cout<<means[i]<<" \n";
+        // }
         if (i == 10 - 1)
         {
             std::cout << summary.FullReport() << "\n";

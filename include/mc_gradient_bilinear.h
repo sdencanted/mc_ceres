@@ -32,6 +32,7 @@ public:
         cudaFree(y_unprojected_);
         cudaFree(x_prime_);
         cudaFree(y_prime_);
+        // cudaFree(bilinear_values_);
         cudaFree(t_);
         cudaFree(image_);
         cudaFree(image_del_theta_x_);
@@ -49,11 +50,11 @@ public:
                        std::vector<float> &x, std::vector<float> &y, std::vector<float> &t, const int height, const int width, const int num_events, int gridSize = 85) : fx_(fx), fy_(fy), cx_(cx), cy_(cy), height_(height), width_(width), num_events_(num_events)
     {
         // create pinned memory for x,y,t,image,image dels
-        cudaMalloc(&x_unprojected_, num_events_ * sizeof(float));
-        cudaMalloc(&y_unprojected_, num_events_ * sizeof(float));
+        cudaMallocHost(&x_unprojected_, num_events_ * sizeof(float));
+        cudaMallocHost(&y_unprojected_, num_events_ * sizeof(float));
         cudaMalloc(&x_prime_, num_events_ * sizeof(float));
         cudaMalloc(&y_prime_, num_events_ * sizeof(float));
-        cudaMalloc(&t_, num_events_ * sizeof(float));
+        cudaMallocHost(&t_, num_events_ * sizeof(float));
         cudaMalloc(&image_, (height_) * (width_) * sizeof(float));
         cudaMalloc(&image_del_theta_x_, (height_) * (width_) * sizeof(float));
         cudaMalloc(&image_del_theta_y_, (height_) * (width_) * sizeof(float));
@@ -104,6 +105,24 @@ public:
             std::cout << "could not allocate cuda mem for " << ptr_name << std::endl;
         }
     }
+    void ReplaceData(std::vector<float> &x, std::vector<float> &y, std::vector<float> &t,const int num_events){
+        num_events_=num_events;
+        
+        cudaFree(x_unprojected_);
+        cudaFree(y_unprojected_);
+        cudaFree(x_prime_);
+        cudaFree(y_prime_);
+        cudaFree(t_);
+
+        
+        cudaMalloc(&x_unprojected_, num_events_ * sizeof(float));
+        cudaMalloc(&y_unprojected_, num_events_ * sizeof(float));
+        cudaMalloc(&x_prime_, num_events_ * sizeof(float));
+        cudaMalloc(&y_prime_, num_events_ * sizeof(float));
+        cudaMalloc(&t_, num_events_ * sizeof(float));
+
+
+    }
     bool Evaluate(const double *const parameters,
                   double *residuals,
                   double *gradient) const override
@@ -119,6 +138,8 @@ public:
         // Populate image
 
         fillImageBilinear(fx_, fy_, cx_, cy_, height_, width_, num_events_, x_unprojected_, y_unprojected_, x_prime_, y_prime_, t_, image_, parameters[0], parameters[1], parameters[2], do_jacobian, image_del_theta_x_, image_del_theta_y_, image_del_theta_z_);
+        
+        // fillImageBilinearIntrinsics(fx_, fy_, cx_, cy_, height_, width_, num_events_, x_unprojected_, y_unprojected_, x_prime_, y_prime_, t_, image_, parameters[0], parameters[1], parameters[2], do_jacobian, image_del_theta_x_, image_del_theta_y_, image_del_theta_z_);
         
 
         // Calculate contrast and if needed jacobian
@@ -170,6 +191,7 @@ private:
     float *y_unprojected_ = NULL;
     float *x_prime_ = NULL;
     float *y_prime_ = NULL;
+    float *bilinear_values_ = NULL;
     float *t_ = NULL;
     int height_;
     int width_;

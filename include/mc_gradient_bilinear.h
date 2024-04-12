@@ -21,6 +21,7 @@
 #include <nvtx3/nvtx3.hpp>
 #include <pthread.h>
 #include <sys/resource.h>
+#include <thread>
 // A CostFunction implementing motion compensation then calculating contrast, as well as the jacobian.
 class McGradientBilinear final : public ceres::FirstOrderFunction
 {
@@ -34,11 +35,11 @@ public:
         cudaFree(y_prime_);
         cudaFree(t_);
         cudaFree(image_);
-        cudaFree(image_del_theta_x_);
-        cudaFree(image_del_theta_y_);
-        cudaFree(image_del_theta_z_);
+        // cudaFree(image_del_theta_x_);
+        // cudaFree(image_del_theta_y_);
+        // cudaFree(image_del_theta_z_);
 
-        checkCudaErrors(cudaFree(contrast_block_sum_));
+        checkCudaErrors(cudaFreeHost(contrast_block_sum_));
         checkCudaErrors(cudaFree(contrast_del_x_block_sum_));
         checkCudaErrors(cudaFree(contrast_del_y_block_sum_));
         checkCudaErrors(cudaFree(contrast_del_z_block_sum_));
@@ -54,16 +55,16 @@ public:
         cudaMalloc(&x_prime_, num_events_ * sizeof(float));
         cudaMalloc(&y_prime_, num_events_ * sizeof(float));
         cudaMallocHost(&t_, num_events_ * sizeof(float));
-        cudaMalloc(&image_, (height_) * (width_) * sizeof(float));
-        cudaMalloc(&image_del_theta_x_, (height_) * (width_) * sizeof(float));
-        cudaMalloc(&image_del_theta_y_, (height_) * (width_) * sizeof(float));
-        cudaMalloc(&image_del_theta_z_, (height_) * (width_) * sizeof(float));
+        cudaMalloc(&image_, (height_) * (width_) * sizeof(float)*4);
+        // cudaMalloc(&image_del_theta_x_, (height_) * (width_) * sizeof(float));
+        // cudaMalloc(&image_del_theta_y_, (height_) * (width_) * sizeof(float));
+        // cudaMalloc(&image_del_theta_z_, (height_) * (width_) * sizeof(float));
 
-        cudaMemsetAsync(image_, 0, (height_) * (width_) * sizeof(float));
-        cudaMemsetAsync(image_del_theta_x_, 0, (height_) * (width_) * sizeof(float));
-        cudaMemsetAsync(image_del_theta_y_, 0, (height_) * (width_) * sizeof(float));
-        cudaMemsetAsync(image_del_theta_z_, 0, (height_) * (width_) * sizeof(float));
-        checkCudaErrors(cudaMalloc((void **)&contrast_block_sum_, 128 * sizeof(float)));
+        cudaMemsetAsync(image_, 0, (height_) * (width_) * sizeof(float)*4);
+        // cudaMemsetAsync(image_del_theta_x_, 0, (height_) * (width_) * sizeof(float));
+        // cudaMemsetAsync(image_del_theta_y_, 0, (height_) * (width_) * sizeof(float));
+        // cudaMemsetAsync(image_del_theta_z_, 0, (height_) * (width_) * sizeof(float));
+        checkCudaErrors(cudaMallocHost((void **)&contrast_block_sum_, 128 * sizeof(float)));
         checkCudaErrors(cudaMalloc((void **)&contrast_del_x_block_sum_, 128 * sizeof(float)));
         checkCudaErrors(cudaMalloc((void **)&contrast_del_y_block_sum_, 128 * sizeof(float)));
         checkCudaErrors(cudaMalloc((void **)&contrast_del_z_block_sum_, 128 * sizeof(float)));
@@ -137,17 +138,19 @@ public:
         // cudaEventCreate(&start);
         // cudaEventCreate(&stop);
         // Populate image
-        fillImageBilinear(fx_, fy_, cx_, cy_, height_, width_, num_events_, x_unprojected_, y_unprojected_, x_prime_, y_prime_, t_, image_, parameters[0], parameters[1], parameters[2],  image_del_theta_x_, image_del_theta_y_, image_del_theta_z_,contrast_block_sum_, contrast_del_x_block_sum_, contrast_del_y_block_sum_, contrast_del_z_block_sum_);
+        fillImageBilinear(fx_, fy_, cx_, cy_, height_, width_, num_events_, x_unprojected_, y_unprojected_, x_prime_, y_prime_, t_, image_, parameters[0], parameters[1], parameters[2],  contrast_block_sum_, contrast_del_x_block_sum_, contrast_del_y_block_sum_, contrast_del_z_block_sum_);
 
-        getContrastDelBatchReduce(image_, image_del_theta_x_, image_del_theta_y_, image_del_theta_z_, residuals, gradient, height_, width_,
+        getContrastDelBatchReduce(image_, residuals, gradient, height_, width_,
                                     contrast_block_sum_, contrast_del_x_block_sum_, contrast_del_y_block_sum_, contrast_del_z_block_sum_, means_, contrast_block_sum_cpu_,num_events_);
 
+        cudaMemsetAsync(this->image_, 0, (this->height_) * (this->width_) * sizeof(float)*4);
 
-
-        cudaMemsetAsync(image_, 0, (height_) * (width_) * sizeof(float));
-        cudaMemsetAsync(image_del_theta_x_, 0, (height_) * (width_) * sizeof(float));
-        cudaMemsetAsync(image_del_theta_y_, 0, (height_) * (width_) * sizeof(float));
-        cudaMemsetAsync(image_del_theta_z_, 0, (height_) * (width_) * sizeof(float));
+        // std::thread memset_thread([this](){
+        //     cudaMemsetAsync(this->image_, 0, (this->height_) * (this->width_) * sizeof(float)*4);
+        // });
+        // cudaMemsetAsync(image_del_theta_x_, 0, (height_) * (width_) * sizeof(float));
+        // cudaMemsetAsync(image_del_theta_y_, 0, (height_) * (width_) * sizeof(float));
+        // cudaMemsetAsync(image_del_theta_z_, 0, (height_) * (width_) * sizeof(float));
         // nvtxRangePop();
         return true;
     }
@@ -183,9 +186,9 @@ private:
     int width_;
     int num_events_;
     float *image_ = NULL;
-    float *image_del_theta_x_ = NULL;
-    float *image_del_theta_y_ = NULL;
-    float *image_del_theta_z_ = NULL;
+    // float *image_del_theta_x_ = NULL;
+    // float *image_del_theta_y_ = NULL;
+    // float *image_del_theta_z_ = NULL;
     float fx_;
     float fy_;
     float cx_;

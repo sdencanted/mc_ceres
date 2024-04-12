@@ -32,13 +32,16 @@ struct SharedMemory
     }
 };
 
-__global__ void fillImageBilinear_(float fx, float fy, float cx, float cy, int height, int width, int num_events, const float *x_unprojected, const float *y_unprojected, float *x_prime, float *y_prime, float *t, float *image, const float rotation_x, const float rotation_y, const float rotation_z, float *image_del_x, float *image_del_y, float *image_del_z, float *contrast_block_sum, float *contrast_del_x_block_sum, float *contrast_del_y_block_sum, float *contrast_del_z_block_sum)
+__global__ void fillImageBilinear_(float fx, float fy, float cx, float cy, int height, int width, int num_events, const float *x_unprojected, const float *y_unprojected, float *x_prime, float *y_prime, float *t, float *image, const float rotation_x, const float rotation_y, const float rotation_z, float *contrast_block_sum, float *contrast_del_x_block_sum, float *contrast_del_y_block_sum, float *contrast_del_z_block_sum)
 {
 
     float image_sum = 0;
     float image_sum_del_theta_x = 0;
     float image_sum_del_theta_y = 0;
     float image_sum_del_theta_z = 0;
+    float *image_del_x = image + height * width;
+    float *image_del_y = image + height * width * 2;
+    float *image_del_z = image + height * width * 3;
     size_t i = size_t(blockIdx.x * blockDim.x + threadIdx.x);
     // size_t num_threads_in_grid = size_t(blockDim.x * gridDim.x);
     if (i < num_events)
@@ -202,7 +205,6 @@ __global__ void fillImageBilinear_(float fx, float fy, float cx, float cy, int h
     {
         temp_sum = sdata[tid - 384];
     }
-    __syncthreads();
     // dump partial sums inside again
     sdata[tid] = temp_sum;
     __syncthreads();
@@ -243,7 +245,7 @@ __global__ void fillImageBilinear_(float fx, float fy, float cx, float cy, int h
         contrast_del_z_block_sum[blockIdx.x] = temp_sum;
     }
 }
-void fillImageBilinear(float fx, float fy, float cx, float cy, int height, int width, int num_events, float *x_unprojected, float *y_unprojected, float *x_prime, float *y_prime, float *t, float *image, const float rotation_x, const float rotation_y, const float rotation_z, float *image_del_x, float *image_del_y, float *image_del_z, float *contrast_block_sum, float *contrast_del_x_block_sum, float *contrast_del_y_block_sum, float *contrast_del_z_block_sum)
+void fillImageBilinear(float fx, float fy, float cx, float cy, int height, int width, int num_events, float *x_unprojected, float *y_unprojected, float *x_prime, float *y_prime, float *t, float *image, const float rotation_x, const float rotation_y, const float rotation_z, float *contrast_block_sum, float *contrast_del_x_block_sum, float *contrast_del_y_block_sum, float *contrast_del_z_block_sum)
 {
     // const int num_sm = 8; // Jetson Orin NX
     // const int blocks_per_sm = 4;
@@ -259,7 +261,7 @@ void fillImageBilinear(float fx, float fy, float cx, float cy, int height, int w
     gridSize = (num_events + blockSize - 1) / blockSize;
 
     int smemSize = blockSize * sizeof(float);
-    fillImageBilinear_<<<gridSize, blockSize, smemSize>>>(fx, fy, cx, cy, height, width, num_events, x_unprojected, y_unprojected, x_prime, y_prime, t, image, rotation_x, rotation_y, rotation_z, image_del_x, image_del_y, image_del_z, contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum);
+    fillImageBilinear_<<<gridSize, blockSize, smemSize>>>(fx, fy, cx, cy, height, width, num_events, x_unprojected, y_unprojected, x_prime, y_prime, t, image, rotation_x, rotation_y, rotation_z, contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum);
 }
 
 __global__ void fillImageKronecker_(int height, int width, int num_events, float *x_prime, float *y_prime, float *image)
@@ -307,9 +309,75 @@ float getMax(float *image, int height, int width)
     return maximum;
 }
 
-__global__ void getContrastDelBatchReduceHarder_(float *image, float *image_del_theta_x, float *image_del_theta_y, float *image_del_theta_z, int num_elements, float *means, float *contrast_block_sum, float *contrast_del_x_block_sum, float *contrast_del_y_block_sum, float *contrast_del_z_block_sum)
+__global__ void getContrastDelBatchReduceHarder_(float *image, int num_elements, float *means, float *contrast_block_sum, float *contrast_del_x_block_sum, float *contrast_del_y_block_sum, float *contrast_del_z_block_sum, int prev_gridsize)
 {
 
+    float *image_del_x = image + num_elements;
+    float *image_del_y = image + num_elements * 2;
+    float *image_del_z = image + num_elements * 3;
+    // START COPY
+    float *sdata = SharedMemory<float>();
+    float temp_sum = 0;
+    uint16_t tid = threadIdx.x;
+    // 85 partial sums to go
+    // dump partial sums inside again
+    if (tid < prev_gridsize)
+    {
+
+        if (blockIdx.x == 0)
+        {
+            temp_sum = contrast_block_sum[tid];
+        }
+        else if (blockIdx.x == 1)
+        {
+            temp_sum = contrast_del_x_block_sum[tid];
+        }
+        else if (blockIdx.x == 2)
+        {
+            temp_sum = contrast_del_y_block_sum[tid];
+        }
+        else if (blockIdx.x == 3)
+        {
+            temp_sum = contrast_del_z_block_sum[tid];
+        }
+    }
+    sdata[tid] = temp_sum;
+    __syncthreads();
+    if ((tid) < 64)
+    {
+        sdata[tid] = temp_sum = temp_sum + sdata[tid + 64];
+    }
+    __syncthreads();
+    if ((tid) < 32)
+    {
+        temp_sum += sdata[tid + 32];
+        // Reduce final warp using shuffle
+        for (uint8_t offset = 32 / 2; offset > 0; offset = offset >> 1)
+        {
+            temp_sum += __shfl_down_sync(FULL_MASK, temp_sum, offset);
+        }
+    }
+    if (tid == 0)
+    {
+        if (blockIdx.x == 0)
+        {
+            means[0] = temp_sum / num_elements;
+        }
+        else if (blockIdx.x == 1)
+        {
+            means[1] = temp_sum / num_elements;
+        }
+        else if (blockIdx.x == 2)
+        {
+            means[2] = temp_sum / num_elements;
+        }
+        else
+        {
+            means[3] = temp_sum / num_elements;
+        }
+    }
+
+    // END COPY
     float image_contrast = 0;
     float image_contrast_del_theta_x = 0;
     float image_contrast_del_theta_y = 0;
@@ -317,25 +385,26 @@ __global__ void getContrastDelBatchReduceHarder_(float *image, float *image_del_
     size_t thread_grid_idx = size_t(blockIdx.x * blockDim.x + threadIdx.x);
     // size_t num_threads_in_grid = size_t(blockDim.x * gridDim.x);
     size_t idx = thread_grid_idx;
+    __syncthreads();
     if (idx < num_elements)
     {
         float image_norm = image[idx] - means[0];
-        float image_norm_x = image_del_theta_x[idx] - means[1];
-        float image_norm_y = image_del_theta_y[idx] - means[2];
-        float image_norm_z = image_del_theta_z[idx] - means[3];
+        float image_norm_x = image_del_x[idx] - means[1];
+        float image_norm_y = image_del_y[idx] - means[2];
+        float image_norm_z = image_del_z[idx] - means[3];
         image_contrast = image_norm * image_norm;
         image_contrast_del_theta_x = image_norm * image_norm_x;
         image_contrast_del_theta_y = image_norm * image_norm_y;
         image_contrast_del_theta_z = image_norm * image_norm_z;
     }
-    float *sdata = SharedMemory<float>();
-    uint16_t tid = threadIdx.x;
+    // float *sdata = SharedMemory<float>();
+    // uint16_t tid = threadIdx.x;
 
     // do reduction in shared mem
 
     // sum up to 128 elements
 
-    float temp_sum;
+    // float temp_sum;
     // image_contrast
     sdata[tid] = image_contrast;
     __syncthreads();
@@ -392,7 +461,6 @@ __global__ void getContrastDelBatchReduceHarder_(float *image, float *image_del_
     {
         temp_sum = sdata[tid - 384];
     }
-    __syncthreads();
     // dump partial sums inside again
     sdata[tid] = temp_sum;
     __syncthreads();
@@ -568,7 +636,7 @@ __global__ void meanPt2_(float *contrast_block_sum, float *contrast_del_x_block_
     }
 }
 
-void getContrastDelBatchReduce(float *image, float *image_del_theta_x, float *image_del_theta_y, float *image_del_theta_z,
+void getContrastDelBatchReduce(float *image,
                                double *image_contrast, double *image_del_theta_contrast,
                                int height, int width,
                                float *contrast_block_sum,
@@ -585,21 +653,25 @@ void getContrastDelBatchReduce(float *image, float *image_del_theta_x, float *im
 
     int smemSize = (blockSize <= 32) ? 2 * blockSize * sizeof(float) : blockSize * sizeof(float);
 
-    meanPt2_<<<4, 128, 128 * sizeof(float)>>>(contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum, height * width, means,prev_gridsize);
+    // meanPt2_<<<4, 128, 128 * sizeof(float)>>>(contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum, height * width, means,prev_gridsize);
 
-    getContrastDelBatchReduceHarder_<<<gridSize, blockSize, smemSize>>>(image, image_del_theta_x, image_del_theta_y, image_del_theta_z, height * width, means, contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum);
+    getContrastDelBatchReduceHarder_<<<gridSize, blockSize, smemSize>>>(image, height * width, means, contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum, prev_gridsize);
 
     getContrastDelBatchReduceHarderPt2_<<<4, 128, 128 * sizeof(float)>>>(contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum, gridSize);
-
-    cudaMemcpy(contrast_block_sum_cpu, contrast_block_sum, sizeof(float) * 4, cudaMemcpyDefault);
-
-    int num_el = height * width;
-    image_contrast[0] = -contrast_block_sum_cpu[0] / num_el;
-    if (image_del_theta_contrast != nullptr)
+    cudaDeviceSynchronize();
+    // cudaMemcpy(contrast_block_sum_cpu, contrast_block_sum, sizeof(float) * 4, cudaMemcpyDefault);
     {
-        image_del_theta_contrast[0] = -2 * contrast_block_sum_cpu[1] / num_el;
-        image_del_theta_contrast[1] = -2 * contrast_block_sum_cpu[2] / num_el;
-        image_del_theta_contrast[2] = -2 * contrast_block_sum_cpu[3] / num_el;
+
+        nvtx3::scoped_range r{"final contrast"};
+        int num_el = height * width;
+        // image_contrast[0] = -contrast_block_sum_cpu[0] / num_el;
+        // image_del_theta_contrast[0] = -2 * contrast_block_sum_cpu[1] / num_el;
+        // image_del_theta_contrast[1] = -2 * contrast_block_sum_cpu[2] / num_el;
+        // image_del_theta_contrast[2] = -2 * contrast_block_sum_cpu[3] / num_el;
+        image_contrast[0] = -contrast_block_sum[0] / num_el;
+        image_del_theta_contrast[0] = -2 * contrast_block_sum[1] / num_el;
+        image_del_theta_contrast[1] = -2 * contrast_block_sum[2] / num_el;
+        image_del_theta_contrast[2] = -2 * contrast_block_sum[3] / num_el;
     }
 }
 

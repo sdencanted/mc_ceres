@@ -32,7 +32,6 @@ public:
         cudaFree(y_unprojected_);
         cudaFree(x_prime_);
         cudaFree(y_prime_);
-        // cudaFree(bilinear_values_);
         cudaFree(t_);
         cudaFree(image_);
         cudaFree(image_del_theta_x_);
@@ -44,10 +43,10 @@ public:
         checkCudaErrors(cudaFree(contrast_del_y_block_sum_));
         checkCudaErrors(cudaFree(contrast_del_z_block_sum_));
         checkCudaErrors(cudaFreeHost(contrast_block_sum_cpu_));
-        checkCudaErrors(cudaFree(means_));
+        checkCudaErrors(cudaFreeHost(means_));
     }
     McGradientBilinear(const float fx, const float fy, const float cx, const float cy,
-                       std::vector<float> &x, std::vector<float> &y, std::vector<float> &t, const int height, const int width, const int num_events, int gridSize = 85) : fx_(fx), fy_(fy), cx_(cx), cy_(cy), height_(height), width_(width), num_events_(num_events)
+                       std::vector<float> &x, std::vector<float> &y, std::vector<float> &t, const int height, const int width, const int num_events) : fx_(fx), fy_(fy), cx_(cx), cy_(cy), height_(height), width_(width), num_events_(num_events)
     {
         // create pinned memory for x,y,t,image,image dels
         cudaMallocHost(&x_unprojected_, num_events_ * sizeof(float));
@@ -56,7 +55,7 @@ public:
         cudaMalloc(&y_prime_, num_events_ * sizeof(float));
         cudaMallocHost(&t_, num_events_ * sizeof(float));
         cudaMalloc(&image_, (height_) * (width_) * sizeof(float));
-        cudaMalloc(&image_del_theta_x_, (height_) * (width_) * sizeof(float));
+        cudaMallocHost(&image_del_theta_x_, (height_) * (width_) * sizeof(float));
         cudaMalloc(&image_del_theta_y_, (height_) * (width_) * sizeof(float));
         cudaMalloc(&image_del_theta_z_, (height_) * (width_) * sizeof(float));
 
@@ -64,11 +63,15 @@ public:
         cudaMemsetAsync(image_del_theta_x_, 0, (height_) * (width_) * sizeof(float));
         cudaMemsetAsync(image_del_theta_y_, 0, (height_) * (width_) * sizeof(float));
         cudaMemsetAsync(image_del_theta_z_, 0, (height_) * (width_) * sizeof(float));
-        checkCudaErrors(cudaMalloc((void **)&contrast_block_sum_, gridSize * sizeof(float)));
-        checkCudaErrors(cudaMalloc((void **)&contrast_del_x_block_sum_, gridSize * sizeof(float)));
-        checkCudaErrors(cudaMalloc((void **)&contrast_del_y_block_sum_, gridSize * sizeof(float)));
-        checkCudaErrors(cudaMalloc((void **)&contrast_del_z_block_sum_, gridSize * sizeof(float)));
-        checkCudaErrors(cudaMalloc(&means_, 4 * sizeof(float)));
+        checkCudaErrors(cudaMalloc((void **)&contrast_block_sum_, 128 * sizeof(float)));
+        checkCudaErrors(cudaMalloc((void **)&contrast_del_x_block_sum_, 128 * sizeof(float)));
+        checkCudaErrors(cudaMalloc((void **)&contrast_del_y_block_sum_, 128 * sizeof(float)));
+        checkCudaErrors(cudaMalloc((void **)&contrast_del_z_block_sum_, 128 * sizeof(float)));
+        cudaMemsetAsync(contrast_block_sum_, 0, 128 * sizeof(float));
+        cudaMemsetAsync(contrast_del_x_block_sum_, 0, 128 * sizeof(float));
+        cudaMemsetAsync(contrast_del_y_block_sum_, 0, 128 * sizeof(float));
+        cudaMemsetAsync(contrast_del_z_block_sum_, 0, 128 * sizeof(float));
+        checkCudaErrors(cudaMallocHost(&means_, 4 * sizeof(float)));
         checkCudaErrors(cudaMallocHost(&contrast_block_sum_cpu_, sizeof(float) * 4));
 
         // precalculate tX-t0 and store to t (potentially redo in CUDA later on)
@@ -96,6 +99,7 @@ public:
         cudaMemcpy(y_unprojected_, y_unprojected_cpu, num_events_ * sizeof(float), cudaMemcpyHostToDevice);
         cub_temp_size_ = getCubSize(image_, height_, width_);
         cudaMalloc(&temp_storage_, cub_temp_size_ * sizeof(float));
+        cudaDeviceSynchronize();
     }
     void tryCudaAllocMapped(float **ptr, size_t size, std::string ptr_name)
     {
@@ -136,18 +140,69 @@ public:
         bool do_jacobian = gradient != nullptr;
         // std::cout<<do_jacobian<<std::endl;
         // Populate image
-
-        fillImageBilinear(fx_, fy_, cx_, cy_, height_, width_, num_events_, x_unprojected_, y_unprojected_, x_prime_, y_prime_, t_, image_, parameters[0], parameters[1], parameters[2], do_jacobian, image_del_theta_x_, image_del_theta_y_, image_del_theta_z_);
+        float* bilinear_values;
+        cudaMallocHost(&bilinear_values,4*num_events_*sizeof(float));
         
-        // fillImageBilinearIntrinsics(fx_, fy_, cx_, cy_, height_, width_, num_events_, x_unprojected_, y_unprojected_, x_prime_, y_prime_, t_, image_, parameters[0], parameters[1], parameters[2], do_jacobian, image_del_theta_x_, image_del_theta_y_, image_del_theta_z_);
-        
-
+        cudaMemset(bilinear_values, 0, 4*num_events_*sizeof(float));
+        fillImageBilinear(fx_, fy_, cx_, cy_, height_, width_, num_events_, x_unprojected_, y_unprojected_, x_prime_, y_prime_, t_, image_, parameters[0], parameters[1], parameters[2], do_jacobian, image_del_theta_x_, image_del_theta_y_, image_del_theta_z_,contrast_block_sum_, contrast_del_x_block_sum_, contrast_del_y_block_sum_, contrast_del_z_block_sum_, bilinear_values);
+        // fillImageBilinear(fx_, fy_, cx_, cy_, height_, width_, num_events_, x_unprojected_, y_unprojected_, x_prime_, y_prime_, t_, image_, 0, 0, 0, do_jacobian, image_del_theta_x_, image_del_theta_y_, image_del_theta_z_,contrast_block_sum_, contrast_del_x_block_sum_, contrast_del_y_block_sum_, contrast_del_z_block_sum_,bilinear_values);
+       // for(int i=0; i< 100;i++){
+        //     std::cout<<bilinear_values[i*4]<<" "<<bilinear_values[i*4+1]<<" "<<bilinear_values[i*4+2]<<" "<<bilinear_values[i*4+3]<<std::endl;
+        // }
+        cudaDeviceSynchronize();
+        float meanx=0;
+        for(int i=0; i< 4*num_events_;i++){
+            meanx+=bilinear_values[i];
+        }
+        std::cout<<"bilinear values"<<meanx<<std::endl;
+        cudaFreeHost(bilinear_values);
+         // std::fill_n(image_del_theta_x_,height_*width_,1e-16);
+        // for(int u=0; u<height_*width_;u++){
+        //     image_del_theta_x_[u]=u/20;
+        // }
         // Calculate contrast and if needed jacobian
 
         // nvtxRangePushA("contrast"); // Begins NVTX range
-        
+        meanx=0;
+        float meansdelx[128];
+        cudaMemcpy(meansdelx,contrast_del_x_block_sum_,128*sizeof(float),cudaMemcpyDeviceToHost);
+        for(int i=0;i<128;i++){
+            
+            // std::cout<<meansdelx[i]<<" ";
+            meanx+=meansdelx[i];
+        }
+        // std::cout<<std::endl;
+        std::cout<<"bilinear:"<<meanx<<" cpu:";
+        float imagedelxcpu[180*240];
+        cudaMemcpy(imagedelxcpu,image_del_theta_x_,height_*width_*sizeof(float),cudaMemcpyDeviceToHost);
+        meanx=0;
+        for(int i=0;i<height_*width_;i++){
+            meanx+=imagedelxcpu[i];
+        }
+        std::cout<<meanx<<" original reduction:";
+        cudaMemsetAsync(contrast_block_sum_, 0, 128 * sizeof(float));
+        cudaMemsetAsync(contrast_del_x_block_sum_, 0, 128 * sizeof(float));
+        cudaMemsetAsync(contrast_del_y_block_sum_, 0, 128 * sizeof(float));
+        cudaMemset(contrast_del_z_block_sum_, 0, 128 * sizeof(float));
         getContrastDelBatchReduce(image_, image_del_theta_x_, image_del_theta_y_, image_del_theta_z_, residuals, gradient, height_, width_,
                                     contrast_block_sum_, contrast_del_x_block_sum_, contrast_del_y_block_sum_, contrast_del_z_block_sum_, means_, contrast_block_sum_cpu_);
+
+        cudaDeviceSynchronize();
+        cudaMemcpy(meansdelx,contrast_del_x_block_sum_,128*sizeof(float),cudaMemcpyDeviceToHost);
+        meanx=0;
+        for(int i=0;i<128;i++){
+            meanx+=meansdelx[i];
+        }
+        std::cout<<meanx<<" "<<means_[1]*width_*height_;
+        meanx=0;
+        for(int i=0;i<height_*width_;i++){
+            meanx+=imagedelxcpu[i];
+        }
+        std::cout<<"cpu again"<<meanx<<" \n";
+        cudaMemsetAsync(contrast_block_sum_, 0, 128 * sizeof(float));
+        cudaMemsetAsync(contrast_del_x_block_sum_, 0, 128 * sizeof(float));
+        cudaMemsetAsync(contrast_del_y_block_sum_, 0, 128 * sizeof(float));
+        cudaMemsetAsync(contrast_del_z_block_sum_, 0, 128 * sizeof(float));
         // if (do_jacobian)
         // {
         //     getContrastDelBatchReduce(image_, image_del_theta_x_, image_del_theta_y_, image_del_theta_z_, residuals, gradient, height_, width_,
@@ -191,7 +246,6 @@ private:
     float *y_unprojected_ = NULL;
     float *x_prime_ = NULL;
     float *y_prime_ = NULL;
-    float *bilinear_values_ = NULL;
     float *t_ = NULL;
     int height_;
     int width_;

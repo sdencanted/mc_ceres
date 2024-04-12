@@ -133,7 +133,7 @@ int main(int argc, char **argv)
     std::stringstream run_name;
     run_name << line_search_direction_type << " " << line_search_type << " " << nonlinear_conjugate_gradient_type;
     std::cout << run_name.str() << std::endl;
-    for (int i = 0; i < 100; i++)
+    for (int i = 0; i < 1; i++)
     {
         nvtx3::scoped_range r{"optimization"};
         std::copy(initial_rotations, initial_rotations + 3, rotations);

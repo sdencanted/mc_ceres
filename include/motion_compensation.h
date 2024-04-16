@@ -18,7 +18,8 @@ void getContrastDelBatchReduce(float *image,
                                float *contrast_del_z_block_sum,
                                float *means,
                                float *contrast_block_sum_cpu,
-                               int num_events);
+                               int num_events,
+                               cudaStream_t const* stream);
 void one_step_kernel(uint64_t seed, float* randoms, int numel);
 
 #endif // CUDACMAKE_TEST_H

@@ -22,6 +22,13 @@
 #include <pthread.h>
 #include <sys/resource.h>
 #include <thread>
+#include <condition_variable>
+#include <iostream>
+#include <mutex>
+void notify(std::shared_ptr<std::condition_variable> cv)
+{
+    cv->notify_one();
+}
 // A CostFunction implementing motion compensation then calculating contrast, as well as the jacobian.
 class McGradientBilinear final : public ceres::FirstOrderFunction
 {
@@ -35,6 +42,9 @@ public:
         cudaFree(y_prime_);
         cudaFree(t_);
         cudaFree(image_);
+        
+        cudaStreamDestroy(stream_[0]);
+        cudaStreamDestroy(stream_[1]);
         // cudaFree(image_del_theta_x_);
         // cudaFree(image_del_theta_y_);
         // cudaFree(image_del_theta_z_);
@@ -45,22 +55,28 @@ public:
         checkCudaErrors(cudaFree(contrast_del_z_block_sum_));
         checkCudaErrors(cudaFreeHost(contrast_block_sum_cpu_));
         checkCudaErrors(cudaFreeHost(means_));
+
+        // running = false;
+        // cv_->notify_one();
+        // if (memset_thread_->joinable())
+        //     memset_thread_->join();
     }
     McGradientBilinear(const float fx, const float fy, const float cx, const float cy,
                        std::vector<float> &x, std::vector<float> &y, std::vector<float> &t, const int height, const int width, const int num_events) : fx_(fx), fy_(fy), cx_(cx), cy_(cy), height_(height), width_(width), num_events_(num_events)
     {
+        cv_ = std::make_shared<std::condition_variable>();
         // create pinned memory for x,y,t,image,image dels
         cudaMallocHost(&x_unprojected_, num_events_ * sizeof(float));
         cudaMallocHost(&y_unprojected_, num_events_ * sizeof(float));
         cudaMalloc(&x_prime_, num_events_ * sizeof(float));
         cudaMalloc(&y_prime_, num_events_ * sizeof(float));
         cudaMallocHost(&t_, num_events_ * sizeof(float));
-        cudaMalloc(&image_, (height_) * (width_) * sizeof(float)*4);
+        cudaMalloc(&image_, (height_) * (width_) * sizeof(float) * 4);
         // cudaMalloc(&image_del_theta_x_, (height_) * (width_) * sizeof(float));
         // cudaMalloc(&image_del_theta_y_, (height_) * (width_) * sizeof(float));
         // cudaMalloc(&image_del_theta_z_, (height_) * (width_) * sizeof(float));
 
-        cudaMemsetAsync(image_, 0, (height_) * (width_) * sizeof(float)*4);
+        cudaMemsetAsync(image_, 0, (height_) * (width_) * sizeof(float) * 4);
         // cudaMemsetAsync(image_del_theta_x_, 0, (height_) * (width_) * sizeof(float));
         // cudaMemsetAsync(image_del_theta_y_, 0, (height_) * (width_) * sizeof(float));
         // cudaMemsetAsync(image_del_theta_z_, 0, (height_) * (width_) * sizeof(float));
@@ -99,8 +115,25 @@ public:
         cudaMemcpy(x_unprojected_, x_unprojected_cpu, num_events_ * sizeof(float), cudaMemcpyHostToDevice);
         cudaMemcpy(y_unprojected_, y_unprojected_cpu, num_events_ * sizeof(float), cudaMemcpyHostToDevice);
 
-        cudaDeviceSynchronize();
+        cudaStreamCreate(&stream_[0]);
+        cudaStreamCreate(&stream_[1]);
+        // cudaDeviceSynchronize();
+        // memset_thread_ = std::make_shared<std::thread>(&McGradientBilinear::memsetFunc, this);
+        // memset_thread_->detach();
     }
+    // void memsetFunc()
+    // {
+    //     // std::mutex m;
+    //     while (running)
+    //     {
+    //         std::unique_lock lk(m_);
+    //         cv_->wait(lk);
+    //         if (!running)
+    //             break;
+    //         cudaMemsetAsync(this->image_, 0, (this->height_) * (this->width_) * sizeof(float) * 4);
+    //         lk.unlock();
+    //     }
+    // }
     void tryCudaAllocMapped(float **ptr, size_t size, std::string ptr_name)
     {
         std::cout << "allocating cuda mem for " << ptr_name << std::endl;
@@ -109,23 +142,21 @@ public:
             std::cout << "could not allocate cuda mem for " << ptr_name << std::endl;
         }
     }
-    void ReplaceData(std::vector<float> &x, std::vector<float> &y, std::vector<float> &t,const int num_events){
-        num_events_=num_events;
-        
+    void ReplaceData(std::vector<float> &x, std::vector<float> &y, std::vector<float> &t, const int num_events)
+    {
+        num_events_ = num_events;
+
         cudaFree(x_unprojected_);
         cudaFree(y_unprojected_);
         cudaFree(x_prime_);
         cudaFree(y_prime_);
         cudaFree(t_);
 
-        
         cudaMalloc(&x_unprojected_, num_events_ * sizeof(float));
         cudaMalloc(&y_unprojected_, num_events_ * sizeof(float));
         cudaMalloc(&x_prime_, num_events_ * sizeof(float));
         cudaMalloc(&y_prime_, num_events_ * sizeof(float));
         cudaMalloc(&t_, num_events_ * sizeof(float));
-
-
     }
     bool Evaluate(const double *const parameters,
                   double *residuals,
@@ -138,19 +169,15 @@ public:
         // cudaEventCreate(&start);
         // cudaEventCreate(&stop);
         // Populate image
-        fillImageBilinear(fx_, fy_, cx_, cy_, height_, width_, num_events_, x_unprojected_, y_unprojected_, x_prime_, y_prime_, t_, image_, parameters[0], parameters[1], parameters[2],  contrast_block_sum_, contrast_del_x_block_sum_, contrast_del_y_block_sum_, contrast_del_z_block_sum_);
+        fillImageBilinear(fx_, fy_, cx_, cy_, height_, width_, num_events_, x_unprojected_, y_unprojected_, x_prime_, y_prime_, t_, image_, parameters[0], parameters[1], parameters[2], contrast_block_sum_, contrast_del_x_block_sum_, contrast_del_y_block_sum_, contrast_del_z_block_sum_);
 
         getContrastDelBatchReduce(image_, residuals, gradient, height_, width_,
-                                    contrast_block_sum_, contrast_del_x_block_sum_, contrast_del_y_block_sum_, contrast_del_z_block_sum_, means_, contrast_block_sum_cpu_,num_events_);
+                                  contrast_block_sum_, contrast_del_x_block_sum_, contrast_del_y_block_sum_, contrast_del_z_block_sum_, means_, contrast_block_sum_cpu_, num_events_,stream_);
 
-        cudaMemsetAsync(this->image_, 0, (this->height_) * (this->width_) * sizeof(float)*4);
+        // cudaMemsetAsync(this->image_, 0, (this->height_) * (this->width_) * sizeof(float)*4);
 
-        // std::thread memset_thread([this](){
-        //     cudaMemsetAsync(this->image_, 0, (this->height_) * (this->width_) * sizeof(float)*4);
-        // });
-        // cudaMemsetAsync(image_del_theta_x_, 0, (height_) * (width_) * sizeof(float));
-        // cudaMemsetAsync(image_del_theta_y_, 0, (height_) * (width_) * sizeof(float));
-        // cudaMemsetAsync(image_del_theta_z_, 0, (height_) * (width_) * sizeof(float));
+        // cv_->notify_one();
+        // cudaMemsetAsync(image_, 0, (height_) * (width_) * sizeof(float)*4);
         // nvtxRangePop();
         return true;
     }
@@ -200,6 +227,11 @@ private:
     float *contrast_del_z_block_sum_;
     float *means_;
     float *contrast_block_sum_cpu_;
+    std::shared_ptr<std::thread> memset_thread_;
+    std::mutex m_;
+    std::shared_ptr<std::condition_variable> cv_;
+    bool running = true;
+    cudaStream_t stream_[2];
 };
 
 #endif // MC_GRADIENT_BILINEAR_H

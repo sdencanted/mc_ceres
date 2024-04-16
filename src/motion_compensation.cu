@@ -645,7 +645,8 @@ void getContrastDelBatchReduce(float *image,
                                float *contrast_del_z_block_sum,
                                float *means,
                                float *contrast_block_sum_cpu,
-                               int num_events)
+                               int num_events,
+                               cudaStream_t const* stream)
 {
     int blockSize = 512; // The launch configurator returned block size
     int prev_gridsize = (num_events + blockSize - 1) / blockSize;
@@ -657,9 +658,11 @@ void getContrastDelBatchReduce(float *image,
 
     getContrastDelBatchReduceHarder_<<<gridSize, blockSize, smemSize>>>(image, height * width, means, contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum, prev_gridsize);
 
-    getContrastDelBatchReduceHarderPt2_<<<4, 128, 128 * sizeof(float)>>>(contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum, gridSize);
+    getContrastDelBatchReduceHarderPt2_<<<4, 128, 128 * sizeof(float),stream[0]>>>(contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum, gridSize);
+    
+    cudaMemsetAsync(image, 0, (height) * (width) * sizeof(float)*4,stream[1]);
     cudaDeviceSynchronize();
-    // cudaMemcpy(contrast_block_sum_cpu, contrast_block_sum, sizeof(float) * 4, cudaMemcpyDefault);
+    // // cudaMemcpy(contrast_block_sum_cpu, contrast_block_sum, sizeof(float) * 4, cudaMemcpyDefault);
     {
 
         nvtx3::scoped_range r{"final contrast"};

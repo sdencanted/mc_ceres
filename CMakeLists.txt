@@ -72,6 +72,10 @@ message(STATUS "Find opencv libraries: ${OpenCV_LIBRARIES}")
 # GSL
 find_package(GSL REQUIRED)
 
+FIND_PACKAGE(dv-processing 1.7.0 REQUIRED)
+
+
+
 include_directories(${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/include)
 
 # main
@@ -89,6 +93,21 @@ target_link_libraries(main
     nvtx3-cpp
 )
 
+# aedat_mc
+cuda_add_executable(aedat_mc src/aedat_mc.cpp src/reduce.cu src/motion_compensation.cu )
+set_property(TARGET aedat_mc PROPERTY CUDA_ARCHITECTURES 87)
+# set_target_properties(main PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+target_include_directories(aedat_mc
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_link_libraries(aedat_mc
+    Ceres::ceres
+    ${CUDA_LIBRARIES}
+    jetson-utils
+    ${OpenCV_LIBS}
+    nvtx3-cpp
+    dv::processing
+)
 # main gsl
 cuda_add_executable(main_gsl src/main_gsl.cpp src/reduce.cu src/motion_compensation.cu )
 # set_target_properties(main_gsl PROPERTIES CUDA_SEPARABLE_COMPILATION ON)

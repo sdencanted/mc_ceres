@@ -386,7 +386,7 @@ __global__ void getContrastDelBatchReduceHarder_(float *image, int num_elements,
     // size_t num_threads_in_grid = size_t(blockDim.x * gridDim.x);
     size_t idx = thread_grid_idx;
     __syncthreads();
-    if (idx < num_elements)
+    while (idx < num_elements)
     {
         float image_norm = image[idx] - means[0];
         float image_norm_x = image_del_x[idx] - means[1];
@@ -396,6 +396,7 @@ __global__ void getContrastDelBatchReduceHarder_(float *image, int num_elements,
         image_contrast_del_theta_x = image_norm * image_norm_x;
         image_contrast_del_theta_y = image_norm * image_norm_y;
         image_contrast_del_theta_z = image_norm * image_norm_z;
+        idx += blockDim.x * gridDim.x;
     }
     // float *sdata = SharedMemory<float>();
     // uint16_t tid = threadIdx.x;
@@ -502,8 +503,9 @@ __global__ void getContrastDelBatchReduceHarder_(float *image, int num_elements,
     }
 }
 
-// 4 blocks 128 threads
-__global__ void getContrastDelBatchReduceHarderPt2_(float *contrast_block_sum, float *contrast_del_x_block_sum, float *contrast_del_y_block_sum, float *contrast_del_z_block_sum, int prev_gridsize)
+// 4 blocks x threads
+template <int prev_gridsize>
+__global__ void getContrastDelBatchReduceHarderPt2_(float *contrast_block_sum, float *contrast_del_x_block_sum, float *contrast_del_y_block_sum, float *contrast_del_z_block_sum)
 {
     float *sdata = SharedMemory<float>();
     float temp_sum;
@@ -536,7 +538,18 @@ __global__ void getContrastDelBatchReduceHarderPt2_(float *contrast_block_sum, f
     }
     sdata[tid] = temp_sum;
     __syncthreads();
-    if ((tid) < 64)
+
+    if (prev_gridsize > 256 && (tid) < 256)
+    {
+        sdata[tid] = temp_sum = temp_sum + sdata[tid + 256];
+    }
+    __syncthreads();
+    if (prev_gridsize > 128 && (tid) < 128)
+    {
+        sdata[tid] = temp_sum = temp_sum + sdata[tid + 128];
+    }
+    __syncthreads();
+    if (prev_gridsize > 64 && (tid) < 64)
     {
         sdata[tid] = temp_sum = temp_sum + sdata[tid + 64];
     }
@@ -644,33 +657,30 @@ void getContrastDelBatchReduce(float *image,
                                float *contrast_del_y_block_sum,
                                float *contrast_del_z_block_sum,
                                float *means,
-                               float *contrast_block_sum_cpu,
                                int num_events,
-                               cudaStream_t const* stream)
+                               cudaStream_t const *stream)
 {
     int blockSize = 512; // The launch configurator returned block size
     int prev_gridsize = (num_events + blockSize - 1) / blockSize;
-    int gridSize = 85; // The actual grid size needed, based on input size
+    // int gridSize = 85; // The actual grid size needed, based on input size
+    int gridSize = std::min(512, (height * width + blockSize - 1) / blockSize);
 
     int smemSize = (blockSize <= 32) ? 2 * blockSize * sizeof(float) : blockSize * sizeof(float);
 
     // meanPt2_<<<4, 128, 128 * sizeof(float)>>>(contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum, height * width, means,prev_gridsize);
 
     getContrastDelBatchReduceHarder_<<<gridSize, blockSize, smemSize>>>(image, height * width, means, contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum, prev_gridsize);
+    if (height == 180 && width == 240)
+        getContrastDelBatchReduceHarderPt2_<85><<<4, 512, 512 * sizeof(float), stream[0]>>>(contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum);
+    else if (height == 480 && width == 640)
+        getContrastDelBatchReduceHarderPt2_<512><<<4, 512, 512 * sizeof(float), stream[0]>>>(contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum);
 
-    getContrastDelBatchReduceHarderPt2_<<<4, 128, 128 * sizeof(float),stream[0]>>>(contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum, gridSize);
-    
-    cudaMemsetAsync(image, 0, (height) * (width) * sizeof(float)*4,stream[1]);
+    cudaMemsetAsync(image, 0, (height) * (width) * sizeof(float) * 4, stream[1]);
     cudaDeviceSynchronize();
-    // // cudaMemcpy(contrast_block_sum_cpu, contrast_block_sum, sizeof(float) * 4, cudaMemcpyDefault);
     {
 
         nvtx3::scoped_range r{"final contrast"};
         int num_el = height * width;
-        // image_contrast[0] = -contrast_block_sum_cpu[0] / num_el;
-        // image_del_theta_contrast[0] = -2 * contrast_block_sum_cpu[1] / num_el;
-        // image_del_theta_contrast[1] = -2 * contrast_block_sum_cpu[2] / num_el;
-        // image_del_theta_contrast[2] = -2 * contrast_block_sum_cpu[3] / num_el;
         image_contrast[0] = -contrast_block_sum[0] / num_el;
         image_del_theta_contrast[0] = -2 * contrast_block_sum[1] / num_el;
         image_del_theta_contrast[1] = -2 * contrast_block_sum[2] / num_el;

@@ -156,7 +156,7 @@ int main(int argc, char **argv)
         ceres::GradientProblemSolver::Summary summary;
         options.minimizer_progress_to_stdout = i == 9;
 
-        ceres::Solve(options, problem, rotations, &summary);
+        // ceres::Solve(options, problem, rotations, &summary);
         cudaDeviceSynchronize();
         
         if (i ==99)

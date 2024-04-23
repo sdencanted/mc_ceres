@@ -91,6 +91,23 @@ target_link_libraries(main
     jetson-utils
     ${OpenCV_LIBS}
     nvtx3-cpp
+    dv::processing
+)
+
+# main_txt
+cuda_add_executable(main_txt src/main_txt.cpp src/reduce.cu src/motion_compensation.cu )
+set_property(TARGET main PROPERTY CUDA_ARCHITECTURES 87)
+# set_target_properties(main PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+target_include_directories(main_txt
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_link_libraries(main_txt
+    Ceres::ceres
+    ${CUDA_LIBRARIES}
+    jetson-utils
+    ${OpenCV_LIBS}
+    nvtx3-cpp
+    dv::processing
 )
 
 # aedat_mc

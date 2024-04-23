@@ -42,8 +42,10 @@ int main(int argc, char **argv)
     bool integrate_reduction = argc > 1;
 
     std::cout.precision(std::numeric_limits<float>::digits10 + 1);
-    int height = 480;
-    int width = 640;
+    // int height = 480;
+    // int width = 640;
+    int height = 180;
+    int width = 240;
     float lower_bound = -5 * 2 * M_PI;
     float upper_bound = 5 * 2 * M_PI;
     bool slice_window = false;
@@ -51,7 +53,8 @@ int main(int argc, char **argv)
     google::InitGoogleLogging(argv[0]);
 
     // dv::io::MonoCameraRecording reader("1hz_mini_lowest_bias_roi_x_300_339-2024_01_25_14_29_17.aedat4");
-    dv::io::MonoCameraRecording reader("5rps_banding.aedat4");
+    // dv::io::MonoCameraRecording reader("/home/airlab/1000efps-2024_01_29_13_35_43.aedat4");
+    dv::io::MonoCameraRecording reader(argv[1]);
     std::string eventStream;
     dv::EventStreamSlicer slicer;
 
@@ -67,9 +70,11 @@ int main(int argc, char **argv)
     assert(!eventStream.empty());
 
     // const float initial_rotations[3] = {0.9431776, 1.599026, -5.062576};
+    // const float initial_rotations[3] = {10, 10, 10};
     const float initial_rotations[3] = {1, 1, 1};
     double rotations[3];
 
+    std::copy(initial_rotations, initial_rotations + 3, rotations);
     ceres::LineSearchDirectionType line_search_direction_type = ceres::LBFGS;
     ceres::LineSearchType line_search_type = ceres::WOLFE;
     ceres::NonlinearConjugateGradientType nonlinear_conjugate_gradient_type = ceres::FLETCHER_REEVES;
@@ -84,26 +89,33 @@ int main(int argc, char **argv)
     options.nonlinear_conjugate_gradient_type = nonlinear_conjugate_gradient_type;
     options.max_num_line_search_step_size_iterations = 4;
     options.function_tolerance = 1e-5;
+    // options.parameter_tolerance = 1e-6;
     options.parameter_tolerance = 1e-6;
     options.minimizer_progress_to_stdout = true;
-    McGradientBilinear *mc_gr = new McGradientBilinear(fx, fy, cx, cy, height, width);
 
     // Slice the data every 10 milliseconds
 
     uint8_t *output_image;
-    cudaMallocHost(&output_image, height * width * sizeof(uint8_t));
+    cudaMallocHost(&output_image, height * width * sizeof(uint8_t)*2);
     int packet_count = 0;
 
-    ceres::GradientProblem problem(mc_gr);
     ceres::GradientProblemSolver::Summary summary;
     slicer.doEveryTimeInterval(10ms, [&](const dv::AddressableEventStorage<dv::Event, dv::EventPacket> &data)
                                {
                                 
+                                    McGradientBilinear *mc_gr = new McGradientBilinear(fx, fy, cx, cy, height, width);
                                     mc_gr->ReplaceData(data);
-                                   std::copy(initial_rotations, initial_rotations + 3, rotations);
-                                   nvtx3::scoped_range r{"optimization"};
+                                    ceres::GradientProblem problem(mc_gr);
+                                    if(abs(rotations[0])+abs(rotations[1])+abs(rotations[2])<1e-3){
 
-
+                                        std::copy(initial_rotations, initial_rotations + 3, rotations);
+                                    }
+                                    nvtx3::scoped_range r{"optimization"};
+                                    double residuals[1];
+                                    double gradients[3];
+                                    // for(int i=0; i<20;i++){
+                                    //     mc_gr->Evaluate(rotations,residuals,gradients);
+                                    // }
                                    ceres::Solve(options, problem, rotations, &summary);
                                    cudaDeviceSynchronize();
                                    if(packet_count%1==0){
@@ -113,13 +125,13 @@ int main(int argc, char **argv)
                                                 << " -> " << rotations[0] << " " << rotations[1] << " " << rotations[2] << " "
                                                 << "\n";
                                         mc_gr->GenerateImage(rotations, output_image);
-                                        cv::Mat mat(height, width, CV_8U, output_image);
+                                        mc_gr->GenerateUncompensatedImage(rotations, output_image+height*width);
+                                        cv::Mat mat(height*2, width, CV_8U, output_image);
                                         
                                         std::stringstream run_name;
-                                        std::cout << run_name.str() << std::endl;
                                         run_name << std::fixed;
                                         run_name << std::setprecision(3);
-                                        run_name << "images/1hz "<<packet_count<<" " << -summary.final_cost << " contrast.png";
+                                        run_name << "images/1hz "<<packet_count<<" " << -summary.final_cost<<" "<<rotations[0]<<" "<<rotations[1]<<" "<<rotations[2] << " contrast.png";
                                         cv::imwrite(run_name.str(),mat);
                                    }
 

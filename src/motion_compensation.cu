@@ -13,7 +13,15 @@
 #include <jetson-utils/cudaMappedMemory.h>
 #include <curand.h>
 #include <curand_kernel.h>
+#include <thrust/host_vector.h>
+#include <thrust/device_vector.h>
 #define FULL_MASK 0xffffffff
+
+float thrustMean(float* image_,int height_,int width_){
+    thrust::device_ptr<float> dev_ptr = thrust::device_pointer_cast(image_);
+    float sum1 = thrust::reduce(dev_ptr, dev_ptr+height_*width_, 0.0, thrust::plus<float>());
+    return sum1/(height_*width_);
+}
 // Utility class used to avoid linker errors with extern
 // unsized shared memory arrays with templated type
 template <class T>
@@ -32,6 +40,186 @@ struct SharedMemory
     }
 };
 
+__global__ void fillImage_(float fx, float fy, float cx, float cy, int height, int width, int num_events, const float *x_unprojected, const float *y_unprojected, float *x_prime, float *y_prime, float *t, float *image, const float rotation_x, const float rotation_y, const float rotation_z, float *contrast_block_sum, float *contrast_del_x_block_sum, float *contrast_del_y_block_sum, float *contrast_del_z_block_sum)
+{
+
+    float image_sum = 0;
+    float image_sum_del_theta_x = 0;
+    float image_sum_del_theta_y = 0;
+    float image_sum_del_theta_z = 0;
+    float *image_del_x = image + height * width;
+    float *image_del_y = image + height * width * 2;
+    float *image_del_z = image + height * width * 3;
+    // size_t i = size_t(blockIdx.x * blockDim.x + threadIdx.x);
+    size_t num_threads_in_grid = size_t(blockDim.x * gridDim.x);
+    // if (i < num_events)
+    for (size_t i = size_t(blockIdx.x * blockDim.x + threadIdx.x); i < num_events; i += num_threads_in_grid)
+    {
+        // calculate theta x,y,z
+        float theta_x_t = rotation_x * t[i];
+        float theta_y_t = rotation_y * t[i];
+        float theta_z_t = rotation_z * t[i];
+
+        // calculate x/y/z_rotated
+        float z_rotated_inv = 1 / (-theta_y_t * x_unprojected[i] + theta_x_t * y_unprojected[i] + 1);
+        float x_rotated_norm = (x_unprojected[i] - theta_z_t * y_unprojected[i] + theta_y_t) * z_rotated_inv;
+        float y_rotated_norm = (theta_z_t * x_unprojected[i] + y_unprojected[i] - theta_x_t) * z_rotated_inv;
+
+        // calculate x_prime and y_prime
+        x_prime[i] = fx * x_rotated_norm + cx;
+        y_prime[i] = fy * y_rotated_norm + cy;
+        // populate image
+        int x_round = round(x_prime[i]);
+        int y_round = round(y_prime[i]);
+        float gaussian;
+
+        if (x_round >= 1 && x_round <= width && y_round >= 1 && y_round <= height)
+        {
+            float fx_div_z_rotated_ti = fx * z_rotated_inv * t[i];
+            float fy_div_z_rotated_ti = fy * z_rotated_inv * t[i];
+            float del_x_del_theta_y = fx_div_z_rotated_ti * (1 + x_unprojected[i] * x_rotated_norm);
+            float del_x_del_theta_z = -fx_div_z_rotated_ti  * y_unprojected[i];
+            float del_x_del_theta_x = del_x_del_theta_z * x_rotated_norm;
+            float del_y_del_theta_x = fy_div_z_rotated_ti * (-1 - y_unprojected[i] * y_rotated_norm);
+            float del_y_del_theta_z = fy_div_z_rotated_ti * x_unprojected[i];
+            float del_y_del_theta_y = del_y_del_theta_z * y_rotated_norm;
+            
+            // for (int row = max(1,y_round - 3); row < min(height,y_round + 4); row++)
+            // {
+            //     for (int col = max(1,x_round - 3); col < min(width,x_round + 4); col++)
+            //     {
+            for (int row = max(1,y_round - 2); row < min(height,y_round + 3); row++)
+            {
+                for (int col = max(1,x_round - 2); col < min(width,x_round + 3); col++)
+                {
+                    // TODO: make a LUT for the values here rounded to a certain s.f. and see if there is a speed-up
+                    float x_diff = col - x_prime[i];
+                    float y_diff = row - y_prime[i];
+                    // float x_diff = col - x_unprojected[i];
+                    // float y_diff = row - y_unprojected[i];
+                    // gaussian = exp((-x_diff * x_diff - y_diff * y_diff) / 2) / sqrt(2 * M_PI);
+                    gaussian = exp((-x_diff * x_diff - y_diff * y_diff) / 2);
+                    int idx = (row - 1) * (width) + col - 1;
+                    
+                    atomicAdd(&image[idx], gaussian);
+                    image_sum+= gaussian;
+                    float del_x=gaussian * (x_diff * del_x_del_theta_x + y_diff * del_y_del_theta_x);
+                    atomicAdd(&image_del_x[idx], del_x);
+                    image_sum_del_theta_x+=del_x;
+                    float del_y=gaussian * (x_diff * del_x_del_theta_y + y_diff * del_y_del_theta_y);
+                    atomicAdd(&image_del_y[idx], del_y);
+                    image_sum_del_theta_y+=del_y;
+                    float del_z=gaussian * (x_diff * del_x_del_theta_z + y_diff * del_y_del_theta_z);
+                    atomicAdd(&image_del_z[idx], del_z);
+                    image_sum_del_theta_z+=del_z;
+                }
+            }
+        }
+    }
+    float *sdata = SharedMemory<float>();
+    uint16_t tid = threadIdx.x;
+
+    // do reduction in shared mem
+
+    // sum up to 128 elements
+
+    float temp_sum;
+    // image_sum
+    sdata[tid] = image_sum;
+    __syncthreads();
+    if (tid < 256)
+        sdata[tid] = image_sum = image_sum + sdata[tid + 256];
+    __syncthreads();
+    // store contrast in 0 to 127
+    if (tid < 128)
+        temp_sum = image_sum + sdata[tid + 128];
+    __syncthreads();
+    // image_sum_del_theta_x
+    sdata[tid] = image_sum_del_theta_x;
+    __syncthreads();
+    if (tid < 256)
+        sdata[tid] = image_sum_del_theta_x = image_sum_del_theta_x + sdata[tid + 256];
+    __syncthreads();
+    if (tid < 128)
+        sdata[tid] = image_sum_del_theta_x = image_sum_del_theta_x + sdata[tid + 128];
+    __syncthreads();
+    // store x in 128 to 255
+    if (tid >= 128 && tid < 256)
+    {
+        temp_sum = sdata[tid - 128];
+    }
+    __syncthreads();
+    // image_sum_del_theta_y
+    sdata[tid] = image_sum_del_theta_y;
+    __syncthreads();
+    if (tid < 256)
+        sdata[tid] = image_sum_del_theta_y = image_sum_del_theta_y + sdata[tid + 256];
+    __syncthreads();
+    if (tid < 128)
+        sdata[tid] = image_sum_del_theta_y = image_sum_del_theta_y + sdata[tid + 128];
+    __syncthreads();
+    // store y in 256 to 383
+    if (tid >= 256 && tid < 384)
+    {
+        temp_sum = sdata[tid - 256];
+    }
+    __syncthreads();
+    // image_sum_del_theta_z
+    sdata[tid] = image_sum_del_theta_z;
+    __syncthreads();
+    if (tid < 256)
+        sdata[tid] = image_sum_del_theta_z = image_sum_del_theta_z + sdata[tid + 256];
+    __syncthreads();
+    if (tid < 128)
+    {
+        sdata[tid] = image_sum_del_theta_z = image_sum_del_theta_z + sdata[tid + 128];
+    }
+    __syncthreads();
+    // store z in 384 to 512
+    if (tid >= 384)
+    {
+        temp_sum = sdata[tid - 384];
+    }
+    // dump partial sums inside again
+    sdata[tid] = temp_sum;
+    __syncthreads();
+    if ((tid & 0x7F) < 64)
+    {
+        sdata[tid] = temp_sum = temp_sum + sdata[tid + 64];
+    }
+    __syncthreads();
+    if ((tid & 0x7F) < 32)
+    {
+        temp_sum += sdata[tid + 32];
+        // Reduce final warp using shuffle
+        for (uint8_t offset = 32 / 2; offset > 0; offset = offset >> 1)
+        {
+            temp_sum += __shfl_down_sync(FULL_MASK, temp_sum, offset);
+        }
+    }
+    __syncthreads();
+
+    if (tid == 0)
+    {
+        // image_sum
+        contrast_block_sum[blockIdx.x] = temp_sum;
+    }
+    else if (tid == 128)
+    {
+        // image_sum_del_theta_x
+        contrast_del_x_block_sum[blockIdx.x] = temp_sum;
+    }
+    else if (tid == 256)
+    {
+        // image_sum_del_theta_y
+        contrast_del_y_block_sum[blockIdx.x] = temp_sum;
+    }
+    else if (tid == 384)
+    {
+        // image_sum_del_theta_x
+        contrast_del_z_block_sum[blockIdx.x] = temp_sum;
+    }
+}
 __global__ void fillImageBilinear_(float fx, float fy, float cx, float cy, int height, int width, int num_events, const float *x_unprojected, const float *y_unprojected, float *x_prime, float *y_prime, float *t, float *image, const float rotation_x, const float rotation_y, const float rotation_z, float *contrast_block_sum, float *contrast_del_x_block_sum, float *contrast_del_y_block_sum, float *contrast_del_z_block_sum)
 {
 
@@ -42,9 +230,10 @@ __global__ void fillImageBilinear_(float fx, float fy, float cx, float cy, int h
     float *image_del_x = image + height * width;
     float *image_del_y = image + height * width * 2;
     float *image_del_z = image + height * width * 3;
-    size_t i = size_t(blockIdx.x * blockDim.x + threadIdx.x);
-    // size_t num_threads_in_grid = size_t(blockDim.x * gridDim.x);
-    if (i < num_events)
+    // size_t i = size_t(blockIdx.x * blockDim.x + threadIdx.x);
+    size_t num_threads_in_grid = size_t(blockDim.x * gridDim.x);
+    // if (i < num_events)
+    for (size_t i = size_t(blockIdx.x * blockDim.x + threadIdx.x); i < num_events; i += num_threads_in_grid)
     {
         // calculate theta x,y,z
         float theta_x_t = rotation_x * t[i];
@@ -258,10 +447,28 @@ void fillImageBilinear(float fx, float fy, float cx, float cy, int height, int w
     // cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize,
     //                                    fillImageBilinear_, 0, 0);
     // Round up according to array size
-    gridSize = (num_events + blockSize - 1) / blockSize;
+    gridSize = std::min(128, (num_events + blockSize - 1) / blockSize);
 
     int smemSize = blockSize * sizeof(float);
     fillImageBilinear_<<<gridSize, blockSize, smemSize>>>(fx, fy, cx, cy, height, width, num_events, x_unprojected, y_unprojected, x_prime, y_prime, t, image, rotation_x, rotation_y, rotation_z, contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum);
+}
+void fillImage(float fx, float fy, float cx, float cy, int height, int width, int num_events, float *x_unprojected, float *y_unprojected, float *x_prime, float *y_prime, float *t, float *image, const float rotation_x, const float rotation_y, const float rotation_z, float *contrast_block_sum, float *contrast_del_x_block_sum, float *contrast_del_y_block_sum, float *contrast_del_z_block_sum)
+{
+    // const int num_sm = 8; // Jetson Orin NX
+    // const int blocks_per_sm = 4;
+    // const int threads_per_block = 128;
+    int blockSize = 512; // The launch configurator returned block size
+    // int minGridSize; // The minimum grid size needed to achieve the
+    // maximum occupancy for a full device launch
+    int gridSize; // The actual grid size needed, based on input size
+
+    // cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize,
+    //                                    fillImageBilinear_, 0, 0);
+    // Round up according to array size
+    gridSize = std::min(128, (num_events + blockSize - 1) / blockSize);
+
+    int smemSize = blockSize * sizeof(float);
+    fillImage_<<<gridSize, blockSize, smemSize>>>(fx, fy, cx, cy, height, width, num_events, x_unprojected, y_unprojected, x_prime, y_prime, t, image, rotation_x, rotation_y, rotation_z, contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum);
 }
 
 __global__ void fillImageKronecker_(int height, int width, int num_events, float *x_prime, float *y_prime, float *image)
@@ -671,14 +878,14 @@ void getContrastDelBatchReduce(float *image,
 
     getContrastDelBatchReduceHarder_<<<gridSize, blockSize, smemSize>>>(image, height * width, means, contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum, prev_gridsize);
     if (height == 180 && width == 240)
-        getContrastDelBatchReduceHarderPt2_<85><<<4, 512, 512 * sizeof(float), stream[0]>>>(contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum);
+        getContrastDelBatchReduceHarderPt2_<85><<<4, 128, 128 * sizeof(float),stream[0]>>>(contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum);
     else if (height == 480 && width == 640)
-        getContrastDelBatchReduceHarderPt2_<512><<<4, 512, 512 * sizeof(float), stream[0]>>>(contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum);
+        getContrastDelBatchReduceHarderPt2_<512><<<4, 512, 512 * sizeof(float),stream[0]>>>(contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum);
 
-    cudaMemsetAsync(image, 0, (height) * (width) * sizeof(float) * 4, stream[1]);
+    cudaMemsetAsync(image, 0, (height) * (width) * sizeof(float) * 4,stream[1]);
+    // cudaMemset(image, 0, (height) * (width) * sizeof(float) * 4);
     cudaDeviceSynchronize();
     {
-
         nvtx3::scoped_range r{"final contrast"};
         int num_el = height * width;
         image_contrast[0] = -contrast_block_sum[0] / num_el;

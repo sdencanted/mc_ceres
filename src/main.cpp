@@ -42,6 +42,8 @@ int main(int argc, char **argv)
     std::cout.precision(std::numeric_limits<float>::digits10 + 1);
     int height = 180;
     int width = 240;
+    // int height = 480;
+    // int width = 640;
     float lower_bound = -5 * 2 * M_PI;
     float upper_bound = 5 * 2 * M_PI;
     bool slice_window = false;
@@ -88,9 +90,9 @@ int main(int argc, char **argv)
     // float y[2] = {55, 99};
     // float t[2] = {0.0, 0.005};
     // const float initial_rotations[3] = {0.0000001, 0.0000001, 0.0000001};
-    // const double initial_rotations[3] = {1e-3, 1e-3, 1e-3};
+    const double initial_rotations[3] = {1e-3, 1e-3, 1e-3};
     // const double initial_rotations[3] = {1, 1, 1};
-    const float initial_rotations[3] = {0.9431776, 1.599026, -5.062576};
+    // const float initial_rotations[3] = {0.9431776, 1.599026, -5.062576};
     double rotations[3];
 
     // auto diff
@@ -133,30 +135,36 @@ int main(int argc, char **argv)
     std::stringstream run_name;
     run_name << line_search_direction_type << " " << line_search_type << " " << nonlinear_conjugate_gradient_type;
     std::cout << run_name.str() << std::endl;
+
+    
+    // McGradient *mc_gr = new McGradient(fx, fy, cx, cy, x, y, t, height, width, event_num, use_middle_ts);
+    McGradientBilinear *mc_gr = new McGradientBilinear(fx, fy, cx, cy, height, width);
+    ceres::GradientProblem problem(mc_gr);
+    ceres::GradientProblemSolver::Options options;
+    // // STEEPEST_DESCENT, NONLINEAR_CONJUGATE_GRADIENT, BFGS and LBFGS.
+    // options.line_search_direction_type = line_search_direction_type;
+    // //  ARMIJO and WOLFE
+    // options.line_search_type = line_search_type;
+    // // FLETCHER_REEVES, POLAK_RIBIERE and HESTENES_STIEFEL
+    // options.nonlinear_conjugate_gradient_type = nonlinear_conjugate_gradient_type;
+    options.max_num_line_search_step_size_iterations = 4;
+    options.function_tolerance = 1e-4;
+    // options.function_tolerance = 1e-5;
+    options.parameter_tolerance = 1e-6;
     for (int i = 0; i < 100; i++)
     {
         nvtx3::scoped_range r{"optimization"};
         std::copy(initial_rotations, initial_rotations + 3, rotations);
         assert(rotations[2] == initial_rotations[2]);
 
-        // McGradient *mc_gr = new McGradient(fx, fy, cx, cy, x, y, t, height, width, event_num, use_middle_ts);
-        McGradientBilinear *mc_gr = new McGradientBilinear(fx, fy, cx, cy, x, y, t, height, width, event_num);
-        ceres::GradientProblem problem(mc_gr);
-        ceres::GradientProblemSolver::Options options;
-        // STEEPEST_DESCENT, NONLINEAR_CONJUGATE_GRADIENT, BFGS and LBFGS.
-        options.line_search_direction_type = line_search_direction_type;
-        //  ARMIJO and WOLFE
-        options.line_search_type = line_search_type;
-        // FLETCHER_REEVES, POLAK_RIBIERE and HESTENES_STIEFEL
-        options.nonlinear_conjugate_gradient_type = nonlinear_conjugate_gradient_type;
-        options.max_num_line_search_step_size_iterations = 4;
-        options.function_tolerance = 1e-5;
-        options.parameter_tolerance = 1e-6;
+        mc_gr->ReplaceData(x,y,t,event_num);
+        
 
         ceres::GradientProblemSolver::Summary summary;
         options.minimizer_progress_to_stdout = i == 9;
 
-        // ceres::Solve(options, problem, rotations, &summary);
+        ceres::Solve(options, problem, rotations, &summary);
+
         cudaDeviceSynchronize();
         
         if (i ==99)
@@ -172,12 +180,18 @@ int main(int argc, char **argv)
             // rotations[0]=0;
             // rotations[1]=0;
             // rotations[2]=0;
-            mc_gr->GenerateImage(rotations, output_image);
+            float contrast;
+            mc_gr->GenerateImage(rotations, output_image,contrast);
             cv::Mat mat(height, width, CV_8U, output_image);
             run_name << std::fixed;
             run_name << std::setprecision(2);
             run_name << " " << -summary.final_cost << " contrast.png";
             cv::imwrite(run_name.str(), mat);
+            float xprime[100];
+            cudaMemcpy(xprime,mc_gr->x_prime_,100*sizeof(float),cudaMemcpyDefault);
+            for(int u=0;u<100;u++){
+                std::cout<<xprime[u]<<std::endl;
+            }
             // }
             //         }
             //     }

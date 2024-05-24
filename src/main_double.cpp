@@ -9,12 +9,12 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <jetson-utils/cudaMappedMemory.h>
-#include "motion_compensation_float.h"
+#include "motion_compensation_double.h"
 // 
 // #include <cblas.h>
 // #include "mc_functor.h"
 // #include "mc_gradient.h"
-#include "mc_gradient.h"
+#include "mc_gradient_double.h"
 // #include "mc_leastsquares.h"
 
 #include <fstream>
@@ -29,7 +29,7 @@
 
 int main(int argc, char **argv)
 {
-    
+
     // cv::Mat mat2;
     // uint8_t output_image1[height*width];
     // cv::Mat mat1(height, width, CV_8U, output_image1);
@@ -39,7 +39,7 @@ int main(int argc, char **argv)
     // cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync);
     bool integrate_reduction = argc > 1;
 
-    std::cout.precision(std::numeric_limits<float>::digits10 + 1);
+    std::cout.precision(std::numeric_limits<double>::digits10 + 1);
     // int height = 180;
     // int width = 240;
     // int height = 480;
@@ -48,20 +48,21 @@ int main(int argc, char **argv)
     // int width = 400;
     int height = 720;
     int width = 1280;
-    float lower_bound = -5 * 2 * M_PI;
-    float upper_bound = 5 * 2 * M_PI;
+    double lower_bound = -5 * 2 * M_PI;
+    double upper_bound = 5 * 2 * M_PI;
     bool slice_window = false;
-    // float fx = 199.092366542, fy = 198.82882047, cx = 132.192071378, cy = 110.712660011; // boxes
-    float fx = 3.22418800e+03, fy = 3.21510040e+03, cx = (8.80357033e+02), cy = (4.17066114e+02) ; // evk4
-    // float fx = 1.7904096255342997e+03, fy = 1.7822557654303025e+03, cx = (3.2002555821529580e+02)-244, cy = (2.3647053629109917e+02)-84; // dvx micro
+    // double fx = 199.092366542, fy = 198.82882047, cx = 132.192071378, cy = 110.712660011; // boxes
+    double fx = 3.22418800e+03, fy = 3.21510040e+03, cx = (8.80357033e+02), cy = (4.17066114e+02); // evk4
+    // double fx = 1.7904096255342997e+03, fy = 1.7822557654303025e+03, cx = (3.2002555821529580e+02)-244, cy = (2.3647053629109917e+02)-84; // dvx micro
     google::InitGoogleLogging(argv[0]);
 
     // load csv to x,y,t
     // std::ifstream events_str("boxes_rotation.csv", std::ifstream::in);
     // std::ifstream events_str("event.csv", std::ifstream::in);
-    std::string filename="bag_00000.csv";
-    if(argc>1){
-        filename=argv[1];
+    std::string filename = "bag_00000.csv";
+    if (argc > 1)
+    {
+        filename = argv[1];
     }
     std::ifstream events_str(filename, std::ifstream::in);
 
@@ -70,16 +71,16 @@ int main(int argc, char **argv)
     events_str.clear();
     events_str.seekg(0);
     std::string line;
-    std::vector<float> t, x, y;
+    std::vector<double> t, x, y;
     int event_num = 0;
-    
+
     // for (int i = 0; i < total_event_num; i++)
     // {
     //     std::getline(events_str, line);
     //     std::stringstream lineStream(line);
     //     std::string cell;
     //     std::getline(lineStream, cell, ',');
-    //     float time = stod(cell);
+    //     double time = stod(cell);
     //     if ((!slice_window) || (time >= 30 && time < 30.01))
     //     {
     //         t.push_back(time);
@@ -95,8 +96,7 @@ int main(int argc, char **argv)
     //     }
     // }
 
-    
-    int64_t middle_t=-1;
+    int64_t middle_t = -1;
     for (int i = 0; i < total_event_num; i++)
     {
         std::getline(events_str, line);
@@ -104,10 +104,12 @@ int main(int argc, char **argv)
         std::string cell;
         std::getline(lineStream, cell, ',');
         int64_t time = stoll(cell);
-        if(middle_t<0){
-            middle_t=time+ 5 * 1e6;;
+        if (middle_t < 0)
+        {
+            middle_t = time + 5 * 1e6;
+            ;
         }
-        t.push_back((time-middle_t)/1e9);
+        t.push_back((time - middle_t) / 1e9);
         std::getline(lineStream, cell, ',');
         x.push_back(stod(cell));
         std::getline(lineStream, cell, ',');
@@ -117,19 +119,15 @@ int main(int argc, char **argv)
 
     // The variable to solve for with its initial value. It will be
     // mutated in place by the solver.
-    // float x[2] = {66, 77};
-    // float y[2] = {55, 99};
-    // float t[2] = {0.0, 0.005};
-    // const float initial_rotations[3] = {0.0000001, 0.0000001, 0.0000001};
+    // double x[2] = {66, 77};
+    // double y[2] = {55, 99};
+    // double t[2] = {0.0, 0.005};
+    // const double initial_rotations[3] = {0.0000001, 0.0000001, 0.0000001};
     // const double initial_rotations[3] = {1e-3, 1e-3, 1e-3};
     // const double initial_rotations[3] = {6.30, 1e-3, 1e-3};
-    double initial_rotations[3] = {1, 1, 1};
-    if(argc>=5){
-        initial_rotations[0]=std::stof(argv[2]);
-        initial_rotations[1]=std::stof(argv[3]);
-        initial_rotations[2]=std::stof(argv[4]);
-    }
-    // const float initial_rotations[3] = {0.9431776, 1.599026, -5.062576};
+    // const double initial_rotations[3] = {1, 1, 1};
+    const double initial_rotations[3] = {1, -20, 1};
+    // const double initial_rotations[3] = {0.9431776, 1.599026, -5.062576};
     double rotations[3];
 
     // auto diff
@@ -167,17 +165,16 @@ int main(int argc, char **argv)
     ceres::LineSearchDirectionType line_search_direction_type = ceres::LBFGS;
     ceres::LineSearchType line_search_type = ceres::WOLFE;
     ceres::NonlinearConjugateGradientType nonlinear_conjugate_gradient_type = ceres::FLETCHER_REEVES;
-    float total_time_ms = 0;
+    double total_time_ms = 0;
 
     std::stringstream run_name;
     run_name << line_search_direction_type << " " << line_search_type << " " << nonlinear_conjugate_gradient_type;
     std::cout << run_name.str() << std::endl;
 
-    
     // McGradient *mc_gr = new McGradient(fx, fy, cx, cy, x, y, t, height, width, event_num, use_middle_ts);
 
     // std::shared_ptr<McGradient> mc_gr = std::make_shared<McGradient>(fx, fy, cx, cy, height, width);
-    McGradient* mc_gr = new McGradient(fx, fy, cx, cy, height, width);
+    McGradient *mc_gr = new McGradient(fx, fy, cx, cy, height, width);
     ceres::GradientProblemSolver::Options options;
     // // STEEPEST_DESCENT, NONLINEAR_CONJUGATE_GRADIENT, BFGS and LBFGS.
     // options.line_search_direction_type = line_search_direction_type;
@@ -185,55 +182,48 @@ int main(int argc, char **argv)
     // options.line_search_type = line_search_type;
     // // FLETCHER_REEVES, POLAK_RIBIERE and HESTENES_STIEFEL
     // options.nonlinear_conjugate_gradient_type = nonlinear_conjugate_gradient_type;
+    options.min_line_search_step_size = 1e-99;
     options.max_num_line_search_step_size_iterations = 4;
     options.function_tolerance = 1e-4;
     // options.function_tolerance = 1e-5;
     options.parameter_tolerance = 1e-6;
+    options.minimizer_progress_to_stdout = true;
     for (int i = 0; i < 1; i++)
     {
         nvtx3::scoped_range r{"optimization"};
         std::copy(initial_rotations, initial_rotations + 3, rotations);
         assert(rotations[2] == initial_rotations[2]);
-        mc_gr->ReplaceData(x,y,t,event_num);
-        double residuals[1]={0};
-        double gradient[3]={0};
-        // mc_gr->Evaluate(rotations,residuals,gradient);
-        // std::copy(initial_rotations, initial_rotations + 3, rotations);
-        // mc_gr->Evaluate(rotations,residuals,gradient);
-        // std::copy(initial_rotations, initial_rotations + 3, rotations);
-        // mc_gr->Evaluate(rotations,residuals,gradient);
-        // std::copy(initial_rotations, initial_rotations + 3, rotations);
-        // mc_gr->Evaluate(rotations,residuals,gradient);
-        // std::copy(initial_rotations, initial_rotations + 3, rotations);
-        // mc_gr->Evaluate(rotations,residuals,gradient);
-        // std::copy(initial_rotations, initial_rotations + 3, rotations);
-        // mc_gr->Evaluate(rotations,residuals,gradient);
-        // std::copy(initial_rotations, initial_rotations + 3, rotations);
-        // mc_gr->Evaluate(rotations,residuals,gradient);
-        // std::copy(initial_rotations, initial_rotations + 3, rotations);
-        // mc_gr->Evaluate(rotations,residuals,gradient);
-        // std::copy(initial_rotations, initial_rotations + 3, rotations);
-        // mc_gr->Evaluate(rotations,residuals,gradient);
-        // std::copy(initial_rotations, initial_rotations + 3, rotations);
-        // mc_gr->Evaluate(rotations,residuals,gradient);
-        // std::copy(initial_rotations, initial_rotations + 3, rotations);
-        // mc_gr->Evaluate(rotations,residuals,gradient);
-        // std::copy(initial_rotations, initial_rotations + 3, rotations);
-        // mc_gr->Evaluate(rotations,residuals,gradient);
-        // std::copy(initial_rotations, initial_rotations + 3, rotations);
+        mc_gr->ReplaceData(x, y, t, event_num);
+        double residuals[1] = {0};
+        double gradient[3] = {0};
 
-        // McGradientInterface *mc_gr_interface = new McGradientInterface(mc_gr);  
+        for (int y = 0; y < 10; y++)
+        {
+
+            mc_gr->Evaluate(rotations, residuals, gradient);
+            std::copy(initial_rotations, initial_rotations + 3, rotations);
+            // mc_gr->EvaluateCpu(rotations, residuals, gradient);
+            // std::copy(initial_rotations, initial_rotations + 3, rotations);
+            // double image_sample[100];
+            // cudaMemcpy(image_sample, mc_gr->image_ + width * 200, sizeof(double) * 100, cudaMemcpyDefault);
+            // for (int u = 0;u < 10; u++)
+            // {
+            //     std::cout << image_sample[u] << std::endl;
+            // }
+        }
+
+        // rotations[1] = -20;
+        // McGradientInterface *mc_gr_interface = new McGradientInterface(mc_gr);
         ceres::GradientProblem problem(mc_gr);
-        
 
         ceres::GradientProblemSolver::Summary summary;
-        options.minimizer_progress_to_stdout = i == 9;
+        options.minimizer_progress_to_stdout= true;
 
         ceres::Solve(options, problem, rotations, &summary);
 
         cudaDeviceSynchronize();
-        
-        if (i ==0)
+
+        if (i == 0)
         {
             std::cout << summary.FullReport() << "\n";
             // std::cout << summary.BriefReport() << "\n";
@@ -246,15 +236,15 @@ int main(int argc, char **argv)
             // // rotations[0]=0;
             // // rotations[1]=0;
             // // rotations[2]=0;
-            float contrast;
-            mc_gr->GenerateImage(rotations, output_image,contrast);
+            double contrast;
+            mc_gr->GenerateImage(rotations, output_image, contrast);
             cv::Mat mat(height, width, CV_8U, output_image);
             run_name << std::fixed;
             run_name << std::setprecision(2);
             run_name << " " << -summary.final_cost << " contrast.png";
             cv::imwrite(run_name.str(), mat);
-            // float xprime[100];
-            // cudaMemcpy(xprime,mc_gr->x_prime_,100*sizeof(float),cudaMemcpyDefault);
+            // double xprime[100];
+            // cudaMemcpy(xprime,mc_gr->x_prime_,100*sizeof(double),cudaMemcpyDefault);
             // for(int u=0;u<100;u++){
             //     std::cout<<xprime[u]<<std::endl;
             // }

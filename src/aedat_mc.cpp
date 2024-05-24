@@ -11,12 +11,12 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <jetson-utils/cudaMappedMemory.h>
-#include "motion_compensation.h"
-// #include "reduce.h"
+#include "motion_compensation_float.h"
+// 
 // #include <cblas.h>
 // #include "mc_functor.h"
 // #include "mc_gradient.h"
-#include "mc_gradient_bilinear.h"
+#include "mc_gradient.h"
 // #include "mc_leastsquares.h"
 
 #include <fstream>
@@ -32,20 +32,11 @@
 int main(int argc, char **argv)
 {
     using namespace std::chrono_literals;
-    // cv::Mat mat2;
-    // uint8_t output_image1[height*width];
-    // cv::Mat mat1(height, width, CV_8U, output_image1);
-    // openblas_set_num_threads(1);
-    cudaSetDeviceFlags(cudaDeviceScheduleSpin);
-    // cudaSetDeviceFlags(cudaDeviceScheduleYield);
-    // cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync);
     bool integrate_reduction = argc > 1;
 
     std::cout.precision(std::numeric_limits<float>::digits10 + 1);
-    // int height = 480;
-    // int width = 640;
-    int height = 180;
-    int width = 240;
+    int height = 480;
+    int width = 640;
     float lower_bound = -5 * 2 * M_PI;
     float upper_bound = 5 * 2 * M_PI;
     bool slice_window = false;
@@ -53,15 +44,22 @@ int main(int argc, char **argv)
     google::InitGoogleLogging(argv[0]);
 
     // dv::io::MonoCameraRecording reader("1hz_mini_lowest_bias_roi_x_300_339-2024_01_25_14_29_17.aedat4");
-    // dv::io::MonoCameraRecording reader("/home/airlab/1000efps-2024_01_29_13_35_43.aedat4");
-    dv::io::MonoCameraRecording reader(argv[1]);
+    std::shared_ptr<dv::io::MonoCameraRecording> reader;
+    if (argc < 2)
+    {
+        reader = std::make_shared<dv::io::MonoCameraRecording>("/home/airlab/fan-2024_04_17_17_46_40.aedat4");
+    }
+    else
+    {
+
+        reader = std::make_shared<dv::io::MonoCameraRecording>(argv[1]);
+    }
     std::string eventStream;
-    dv::EventStreamSlicer slicer;
 
     // Find streams with compatible types from the list of all available streams
-    for (const auto &name : reader.getStreamNames())
+    for (const auto &name : reader->getStreamNames())
     {
-        if (reader.isStreamOfDataType<dv::EventPacket>(name) && eventStream.empty())
+        if (reader->isStreamOfDataType<dv::EventPacket>(name) && eventStream.empty())
         {
             eventStream = name;
         }
@@ -91,21 +89,25 @@ int main(int argc, char **argv)
     options.function_tolerance = 1e-5;
     // options.parameter_tolerance = 1e-6;
     options.parameter_tolerance = 1e-6;
-    options.minimizer_progress_to_stdout = true;
+    options.minimizer_progress_to_stdout = false;
+    std::shared_ptr<McGradient> mc_gr = std::make_shared<McGradient>(fx, fy, cx, cy, height, width);
 
     // Slice the data every 10 milliseconds
 
     uint8_t *output_image;
-    cudaMallocHost(&output_image, height * width * sizeof(uint8_t)*2);
+    cudaMallocHost(&output_image, height * width * sizeof(uint8_t) * 2);
     int packet_count = 0;
 
     ceres::GradientProblemSolver::Summary summary;
+    dv::EventStreamSlicer slicer;
+    ceres::GradientProblem problem(mc_gr.get());
     slicer.doEveryTimeInterval(10ms, [&](const dv::AddressableEventStorage<dv::Event, dv::EventPacket> &data)
                                {
                                 
-                                    McGradientBilinear *mc_gr = new McGradientBilinear(fx, fy, cx, cy, height, width);
                                     mc_gr->ReplaceData(data);
-                                    ceres::GradientProblem problem(mc_gr);
+                                    
+                                    // McGradientInterface *mc_gr_interface = new McGradientInterface(mc_gr);
+
                                     if(abs(rotations[0])+abs(rotations[1])+abs(rotations[2])<1e-3){
 
                                         std::copy(initial_rotations, initial_rotations + 3, rotations);
@@ -113,19 +115,17 @@ int main(int argc, char **argv)
                                     nvtx3::scoped_range r{"optimization"};
                                     double residuals[1];
                                     double gradients[3];
-                                    // for(int i=0; i<20;i++){
-                                    //     mc_gr->Evaluate(rotations,residuals,gradients);
-                                    // }
                                    ceres::Solve(options, problem, rotations, &summary);
                                    cudaDeviceSynchronize();
                                    if(packet_count%1==0){
-                                         std::cout << summary.FullReport() << "\n";
+                                        //  std::cout << summary.FullReport() << "\n";
 
                                         std::cout << "rot : " << initial_rotations[0] << " " << initial_rotations[1] << " " << initial_rotations[2] << " "
                                                 << " -> " << rotations[0] << " " << rotations[1] << " " << rotations[2] << " "
                                                 << "\n";
-                                        mc_gr->GenerateImage(rotations, output_image);
-                                        mc_gr->GenerateUncompensatedImage(rotations, output_image+height*width);
+                                        float contrast;
+                                        mc_gr->GenerateImage(rotations, output_image,contrast);
+                                        mc_gr->GenerateUncompensatedImage(rotations, output_image+height*width,contrast);
                                         cv::Mat mat(height*2, width, CV_8U, output_image);
                                         
                                         std::stringstream run_name;
@@ -135,12 +135,13 @@ int main(int argc, char **argv)
                                         cv::imwrite(run_name.str(),mat);
                                    }
 
-                                    packet_count++; });
+                                    packet_count++; 
+                                    });
 
     // Read event in a loop, this is needed since events are stored in small batches of short period of time
-    while (const auto events = reader.getNextEventBatch(eventStream))
+    while (const auto events = reader->getNextEventBatch(eventStream))
     {
-        std::cout << events->getHighestTime() << std::endl;
+        // std::cout << events->getHighestTime() << std::endl;
         // Pass events to the slicer
         slicer.accept(*events);
     }

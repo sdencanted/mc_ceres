@@ -1,5 +1,5 @@
 #include "mc_gradient_bilinear.h"
-#include "motion_compensation.h"
+#include "motion_compensation_float.h"
 // CUDA
 #ifdef __INTELLISENSE__
 #define __CUDACC__
@@ -7,8 +7,8 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <jetson-utils/cudaMappedMemory.h>
-#include "motion_compensation.h"
-#include "reduce.h"
+#include "motion_compensation_float.h"
+
 #include "utils.h"
 
 #include <fstream>

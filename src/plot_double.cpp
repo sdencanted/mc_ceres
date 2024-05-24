@@ -9,8 +9,8 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <jetson-utils/cudaMappedMemory.h>
-#include "motion_compensation_float.h"
-#include "mc_gradient.h"
+#include "motion_compensation_double.h"
+#include "mc_gradient_double.h"
 
 #include <fstream>
 #include <iostream>
@@ -24,16 +24,16 @@
 int main(int argc, char **argv)
 {
 
-    std::cout.precision(std::numeric_limits<float>::digits10 + 1);
+    std::cout.precision(std::numeric_limits<double>::digits10 + 1);
     // int height = 180;
     // int width = 240;
     int height = 720;
     int width = 1280;
-    float lower_bound = -5 * 2 * M_PI;
-    float upper_bound = 5 * 2 * M_PI;
+    double lower_bound = -5 * 2 * M_PI;
+    double upper_bound = 5 * 2 * M_PI;
     bool slice_window = false;
-    // float fx = 199.092366542, fy = 198.82882047, cx = 132.192071378, cy = 110.712660011; // boxes
-    float fx = 3.22418800e+03, fy = 3.21510040e+03, cx = (8.80357033e+02), cy = (4.17066114e+02) ; // evk4
+    // double fx = 199.092366542, fy = 198.82882047, cx = 132.192071378, cy = 110.712660011; // boxes
+    double fx = 3.22418800e+03, fy = 3.21510040e+03, cx = (8.80357033e+02), cy = (4.17066114e+02) ; // evk4
     google::InitGoogleLogging(argv[0]);
 
     // load csv to x,y,t
@@ -45,7 +45,7 @@ int main(int argc, char **argv)
     events_str.clear();
     events_str.seekg(0);
     std::string line;
-    std::vector<float> t, x, y;
+    std::vector<double> t, x, y;
     int event_num = 0;
     int64_t middle_t=-1;
     for (int i = 0; i < total_event_num; i++)
@@ -68,18 +68,18 @@ int main(int argc, char **argv)
 
     // The variable to solve for with its initial value. It will be
     // mutated in place by the solver.
-    // float x[2] = {66, 77};
-    // float y[2] = {55, 99};
-    // float t[2] = {0.0, 0.005};
-    // const float initial_rotations[3] = {0.0000001, 0.0000001, 0.0000001};
+    // double x[2] = {66, 77};
+    // double y[2] = {55, 99};
+    // double t[2] = {0.0, 0.005};
+    // const double initial_rotations[3] = {0.0000001, 0.0000001, 0.0000001};
     // const double initial_rotations[3] = {1e-3, 1e-3, 1e-3};
     const double initial_rotations[3] = {1, 1, 1};
-    // const float initial_rotations[3] = {1.034271551346297, 1.737211928725288, -5.752976192620636};
+    // const double initial_rotations[3] = {1.034271551346297, 1.737211928725288, -5.752976192620636};
     double rotations[3];
 
     // manual diff
     // Build the problem.
-    float total_time_ms = 0;
+    double total_time_ms = 0;
 
     
 

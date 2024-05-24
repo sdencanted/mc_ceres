@@ -1,4 +1,4 @@
-#include "motion_compensation.h"
+#include "motion_compensation_float.h"
 
 #include <cmath>
 #include <algorithm> //for std::max
@@ -15,12 +15,20 @@
 #include <curand_kernel.h>
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
+#include <cooperative_groups.h>
 #define FULL_MASK 0xffffffff
-
-float thrustMean(float* image_,int height_,int width_){
+// using namespace cooperative_groups;
+float thrustMean(float *image_, int height_, int width_)
+{
     thrust::device_ptr<float> dev_ptr = thrust::device_pointer_cast(image_);
-    float sum1 = thrust::reduce(dev_ptr, dev_ptr+height_*width_, 0.0, thrust::plus<float>());
-    return sum1/(height_*width_);
+    float sum1 = thrust::reduce(dev_ptr, dev_ptr + height_ * width_, 0.0, thrust::plus<float>());
+    return sum1 / (height_ * width_);
+}
+float thrustSum(float *image_, int num_el)
+{
+    thrust::device_ptr<float> dev_ptr = thrust::device_pointer_cast(image_);
+    float sum1 = thrust::reduce(dev_ptr, dev_ptr + num_el, 0.0, thrust::plus<float>());
+    return sum1;
 }
 // Utility class used to avoid linker errors with extern
 // unsized shared memory arrays with templated type
@@ -78,19 +86,19 @@ __global__ void fillImage_(float fx, float fy, float cx, float cy, int height, i
             float fx_div_z_rotated_ti = fx * z_rotated_inv * t[i];
             float fy_div_z_rotated_ti = fy * z_rotated_inv * t[i];
             float del_x_del_theta_y = fx_div_z_rotated_ti * (1 + x_unprojected[i] * x_rotated_norm);
-            float del_x_del_theta_z = -fx_div_z_rotated_ti  * y_unprojected[i];
+            float del_x_del_theta_z = -fx_div_z_rotated_ti * y_unprojected[i];
             float del_x_del_theta_x = del_x_del_theta_z * x_rotated_norm;
             float del_y_del_theta_x = fy_div_z_rotated_ti * (-1 - y_unprojected[i] * y_rotated_norm);
             float del_y_del_theta_z = fy_div_z_rotated_ti * x_unprojected[i];
             float del_y_del_theta_y = del_y_del_theta_z * y_rotated_norm;
-            
+
             // for (int row = max(1,y_round - 3); row < min(height,y_round + 4); row++)
             // {
             //     for (int col = max(1,x_round - 3); col < min(width,x_round + 4); col++)
             //     {
-            for (int row = max(1,y_round - 2); row < min(height,y_round + 3); row++)
+            for (int row = max(1, y_round - 2); row < min(height, y_round + 3); row++)
             {
-                for (int col = max(1,x_round - 2); col < min(width,x_round + 3); col++)
+                for (int col = max(1, x_round - 2); col < min(width, x_round + 3); col++)
                 {
                     // TODO: make a LUT for the values here rounded to a certain s.f. and see if there is a speed-up
                     float x_diff = col - x_prime[i];
@@ -100,18 +108,17 @@ __global__ void fillImage_(float fx, float fy, float cx, float cy, int height, i
                     // gaussian = exp((-x_diff * x_diff - y_diff * y_diff) / 2) / sqrt(2 * M_PI);
                     gaussian = exp((-x_diff * x_diff - y_diff * y_diff) / 2);
                     int idx = (row - 1) * (width) + col - 1;
-                    
                     atomicAdd(&image[idx], gaussian);
-                    image_sum+= gaussian;
-                    float del_x=gaussian * (x_diff * del_x_del_theta_x + y_diff * del_y_del_theta_x);
+                    image_sum += gaussian;
+                    float del_x = gaussian * (x_diff * del_x_del_theta_x + y_diff * del_y_del_theta_x);
                     atomicAdd(&image_del_x[idx], del_x);
-                    image_sum_del_theta_x+=del_x;
-                    float del_y=gaussian * (x_diff * del_x_del_theta_y + y_diff * del_y_del_theta_y);
+                    image_sum_del_theta_x += del_x;
+                    float del_y = gaussian * (x_diff * del_x_del_theta_y + y_diff * del_y_del_theta_y);
                     atomicAdd(&image_del_y[idx], del_y);
-                    image_sum_del_theta_y+=del_y;
-                    float del_z=gaussian * (x_diff * del_x_del_theta_z + y_diff * del_y_del_theta_z);
+                    image_sum_del_theta_y += del_y;
+                    float del_z = gaussian * (x_diff * del_x_del_theta_z + y_diff * del_y_del_theta_z);
                     atomicAdd(&image_del_z[idx], del_z);
-                    image_sum_del_theta_z+=del_z;
+                    image_sum_del_theta_z += del_z;
                 }
             }
         }
@@ -190,6 +197,7 @@ __global__ void fillImage_(float fx, float fy, float cx, float cy, int height, i
     __syncthreads();
     if ((tid & 0x7F) < 32)
     {
+        // warps of 32 threads are always in sync, no need to sync after this
         temp_sum += sdata[tid + 32];
         // Reduce final warp using shuffle
         for (uint8_t offset = 32 / 2; offset > 0; offset = offset >> 1)
@@ -219,6 +227,37 @@ __global__ void fillImage_(float fx, float fy, float cx, float cy, int height, i
         // image_sum_del_theta_x
         contrast_del_z_block_sum[blockIdx.x] = temp_sum;
     }
+}
+
+__global__ void warpEvents_(float fx, float fy, float cx, float cy, int height, int width, int num_events, const float *x_unprojected, const float *y_unprojected, float *x_prime, float *y_prime, float *t, const float rotation_x, const float rotation_y, const float rotation_z)
+{
+    // size_t i = size_t(blockIdx.x * blockDim.x + threadIdx.x);
+    size_t num_threads_in_grid = size_t(blockDim.x * gridDim.x);
+    // if (i < num_events)
+    for (size_t i = size_t(blockIdx.x * blockDim.x + threadIdx.x); i < num_events; i += num_threads_in_grid)
+    {
+        // calculate theta x,y,z
+        float theta_x_t = rotation_x * t[i];
+        float theta_y_t = rotation_y * t[i];
+        float theta_z_t = rotation_z * t[i];
+
+        // calculate x/y/z_rotated
+        float z_rotated_inv = 1 / (-theta_y_t * x_unprojected[i] + theta_x_t * y_unprojected[i] + 1);
+        float x_rotated_norm = (x_unprojected[i] - theta_z_t * y_unprojected[i] + theta_y_t) * z_rotated_inv;
+        float y_rotated_norm = (theta_z_t * x_unprojected[i] + y_unprojected[i] - theta_x_t) * z_rotated_inv;
+
+        // calculate x_prime and y_prime
+        x_prime[i] = fx * x_rotated_norm + cx;
+        y_prime[i] = fy * y_rotated_norm + cy;
+    }
+}
+void warpEvents(float fx, float fy, float cx, float cy, int height, int width, int num_events, float *x_unprojected, float *y_unprojected, float *x_prime, float *y_prime, float *t, const float rotation_x, const float rotation_y, const float rotation_z)
+{
+    int blockSize = 512; // The launch configurator returned block size
+    int gridSize;        // The actual grid size needed, based on input size
+    gridSize = (num_events + blockSize - 1) / blockSize;
+    int smemSize = blockSize * sizeof(float);
+    warpEvents_<<<gridSize, blockSize, smemSize>>>(fx, fy, cx, cy, height, width, num_events, x_unprojected, y_unprojected, x_prime, y_prime, t, rotation_x, rotation_y, rotation_z);
 }
 __global__ void fillImageBilinear_(float fx, float fy, float cx, float cy, int height, int width, int num_events, const float *x_unprojected, const float *y_unprojected, float *x_prime, float *y_prime, float *t, float *image, const float rotation_x, const float rotation_y, const float rotation_z, float *contrast_block_sum, float *contrast_del_x_block_sum, float *contrast_del_y_block_sum, float *contrast_del_z_block_sum)
 {
@@ -404,6 +443,7 @@ __global__ void fillImageBilinear_(float fx, float fy, float cx, float cy, int h
     __syncthreads();
     if ((tid & 0x7F) < 32)
     {
+        // warps of 32 threads are always in sync, no need to sync after this
         temp_sum += sdata[tid + 32];
         // Reduce final warp using shuffle
         for (uint8_t offset = 32 / 2; offset > 0; offset = offset >> 1)
@@ -515,10 +555,11 @@ float getMax(float *image, int height, int width)
     cudaFree(temp_storage);
     return maximum;
 }
-
-__global__ void getContrastDelBatchReduceHarder_(float *image, int num_elements, float *means, float *contrast_block_sum, float *contrast_del_x_block_sum, float *contrast_del_y_block_sum, float *contrast_del_z_block_sum, int prev_gridsize)
+__device__ volatile float mean_volatile[4] = {0};
+// __global__ void getContrastDelBatchReduceHarder256_(float *image, int num_elements, float *means, float *contrast_block_sum, float *contrast_del_x_block_sum, float *contrast_del_y_block_sum, float *contrast_del_z_block_sum, int prev_gridsize, float *imagedebug)
+__global__ void getContrastDelBatchReduceHarder256_(float *image, int num_elements, float *means, float *contrast_block_sum, float *contrast_del_x_block_sum, float *contrast_del_y_block_sum, float *contrast_del_z_block_sum, int prev_gridsize)
 {
-
+    cooperative_groups::grid_group grid = cooperative_groups::this_grid();
     float *image_del_x = image + num_elements;
     float *image_del_y = image + num_elements * 2;
     float *image_del_z = image + num_elements * 3;
@@ -557,6 +598,236 @@ __global__ void getContrastDelBatchReduceHarder_(float *image, int num_elements,
     __syncthreads();
     if ((tid) < 32)
     {
+        // warps of 32 threads are always in sync, no need to sync after this
+        temp_sum += sdata[tid + 32];
+        // Reduce final warp using shuffle
+        for (uint8_t offset = 32 / 2; offset > 0; offset = offset >> 1)
+        {
+            temp_sum += __shfl_down_sync(FULL_MASK, temp_sum, offset);
+        }
+    }
+    if (tid == 0)
+    {
+        // write means
+        if (blockIdx.x < 4)
+        {
+            mean_volatile[blockIdx.x] = temp_sum / num_elements;
+        }
+    }
+    // __syncthreads();
+
+    // END COPY
+    float image_contrast = 0;
+    float image_contrast_del_theta_x = 0;
+    float image_contrast_del_theta_y = 0;
+    float image_contrast_del_theta_z = 0;
+    size_t thread_grid_idx = size_t(blockIdx.x * blockDim.x + threadIdx.x);
+    size_t idx = thread_grid_idx;
+    cooperative_groups::sync(grid);
+    float mean = mean_volatile[0];
+    float xmean = mean_volatile[1];
+    float ymean = mean_volatile[2];
+    float zmean = mean_volatile[3];
+
+    while (idx < num_elements)
+    {
+        float image_norm = image[idx] - mean;
+        float image_norm_x = image_del_x[idx] - xmean;
+        float image_norm_y = image_del_y[idx] - ymean;
+        float image_norm_z = image_del_z[idx] - zmean;
+        image_contrast += image_norm * image_norm;
+        image_contrast_del_theta_x += image_norm_x * image_norm;
+        image_contrast_del_theta_y += image_norm_y * image_norm;
+        image_contrast_del_theta_z += image_norm_z * image_norm;
+        // imagedebug[idx] = image_norm * image_norm;
+        // imagedebug[idx + num_elements] = image_norm_x * image_norm;
+        // imagedebug[idx + num_elements * 2] = image_norm_y * image_norm;
+        // imagedebug[idx + num_elements * 3] = image_norm_z * image_norm;
+        idx += blockDim.x * gridDim.x;
+    }
+    // BEGIN DEBUG
+    // sdata[tid] = 0;
+    // if(blockIdx.x==0&&threadIdx.x==0){
+    //     for(int idx_special=0;idx_special<num_elements;idx_special++)
+
+    //     {
+    //         float image_norm = image[idx_special] - mean;
+    //         float image_norm_x = image_del_x[idx_special] - xmean;
+    //         float image_norm_y = image_del_y[idx_special] - ymean;
+    //         float image_norm_z = image_del_z[idx_special] - zmean;
+    //         // image_contrast += image_norm * image_norm;
+    //         // image_contrast_del_theta_x += image_norm_x * image_norm;
+    //         // image_contrast_del_theta_y += image_norm_y * image_norm;
+    //         // image_contrast_del_theta_z += image_norm_z * image_norm;
+    //         // imagedebug[idx_special] = image_norm * image_norm;
+    //         // imagedebug[idx_special + num_elements] = image_norm_x * image_norm;
+    //         // imagedebug[idx_special + num_elements * 2] = image_norm_y * image_norm;
+    //         // imagedebug[idx_special + num_elements * 3] = image_norm_z * image_norm;
+
+    //         atomicAdd(&sdata[0], image_norm * image_norm);
+    //         atomicAdd(&sdata[1], image_norm_x * image_norm);
+    //         atomicAdd(&sdata[2], image_norm_y * image_norm);
+    //         atomicAdd(&sdata[3], image_norm_z * image_norm);
+
+    //     }
+
+    //     contrast_block_sum[blockIdx.x] = sdata[0];
+    //     contrast_del_x_block_sum[blockIdx.x] = sdata[1];
+    //     contrast_del_y_block_sum[blockIdx.x] = sdata[2];
+    //     contrast_del_z_block_sum[blockIdx.x] = sdata[3];
+    //     // contrast_block_sum[blockIdx.x] = image_contrast;
+    //     // contrast_del_x_block_sum[blockIdx.x] = image_contrast_del_theta_x;
+    //     // contrast_del_y_block_sum[blockIdx.x] = image_contrast_del_theta_y;
+    //     // contrast_del_z_block_sum[blockIdx.x] = image_contrast_del_theta_z;
+    // }
+    // else{
+
+    //     contrast_block_sum[blockIdx.x] =0;
+    //     contrast_del_x_block_sum[blockIdx.x] =0;
+    //     contrast_del_y_block_sum[blockIdx.x] =0;
+    //     contrast_del_z_block_sum[blockIdx.x] = 0;
+    // }
+    // return;
+    // END DEBUG
+
+    // do reduction in shared mem
+
+    // sum up to 128 elements
+
+    // float temp_sum;
+    // image_contrast
+    sdata[tid] = image_contrast;
+    __syncthreads();
+    if (tid < 128)
+        sdata[tid] = image_contrast = image_contrast + sdata[tid + 128];
+    __syncthreads();
+    // store contrast in 0 to 63
+    if (tid < 64)
+        temp_sum = image_contrast + sdata[tid + 64];
+    __syncthreads();
+    // image_contrast_del_theta_x
+    sdata[tid] = image_contrast_del_theta_x;
+    __syncthreads();
+    if (tid < 128)
+        sdata[tid] = image_contrast_del_theta_x = image_contrast_del_theta_x + sdata[tid + 128];
+    __syncthreads();
+    if (tid < 64)
+        sdata[tid] = image_contrast_del_theta_x = image_contrast_del_theta_x + sdata[tid + 64];
+    __syncthreads();
+    // store x in 64 to 127
+    if (tid >= 64 && tid < 128)
+    {
+        temp_sum = sdata[tid - 64];
+    }
+    __syncthreads();
+    // image_contrast_del_theta_y
+    sdata[tid] = image_contrast_del_theta_y;
+    __syncthreads();
+    if (tid < 128)
+        sdata[tid] = image_contrast_del_theta_y = image_contrast_del_theta_y + sdata[tid + 128];
+    __syncthreads();
+    if (tid < 64)
+        sdata[tid] = image_contrast_del_theta_y = image_contrast_del_theta_y + sdata[tid + 64];
+    __syncthreads();
+    // store y in 128 to 191
+    if (tid >= 128 && tid < 192)
+    {
+        temp_sum = sdata[tid - 128];
+    }
+    __syncthreads();
+    // image_contrast_del_theta_z
+    sdata[tid] = image_contrast_del_theta_z;
+    __syncthreads();
+    if (tid < 128)
+        sdata[tid] = image_contrast_del_theta_z = image_contrast_del_theta_z + sdata[tid + 128];
+    __syncthreads();
+    if (tid < 64)
+    {
+        sdata[tid] = image_contrast_del_theta_z = image_contrast_del_theta_z + sdata[tid + 64];
+    }
+    __syncthreads();
+    // store z in 192 to 255
+    if (tid >= 192)
+    {
+        temp_sum = sdata[tid - 192];
+    }
+    __syncthreads();
+    // dump partial sums inside again
+    sdata[tid] = temp_sum;
+    __syncthreads();
+    if ((tid & 0x3F) < 32)
+    {
+        // warps of 32 threads are always in sync, no need to sync after this
+        temp_sum += sdata[tid + 32];
+        // Reduce final warp using shuffle
+        for (uint8_t offset = 32 / 2; offset > 0; offset = offset >> 1)
+        {
+            temp_sum += __shfl_down_sync(FULL_MASK, temp_sum, offset);
+        }
+    }
+
+    if (tid == 0)
+    {
+        // image_contrast
+        contrast_block_sum[blockIdx.x] = temp_sum;
+    }
+    else if (tid == 64)
+    {
+        // image_contrast_del_theta_x
+        contrast_del_x_block_sum[blockIdx.x] = temp_sum;
+    }
+    else if (tid == 128)
+    {
+        // image_contrast_del_theta_y
+        contrast_del_y_block_sum[blockIdx.x] = temp_sum;
+    }
+    else if (tid == 192)
+    {
+        // image_contrast_del_theta_x
+        contrast_del_z_block_sum[blockIdx.x] = temp_sum;
+    }
+}
+__global__ void getContrastDelBatchReduceHarder_(float *image, int num_elements, float *means, float *contrast_block_sum, float *contrast_del_x_block_sum, float *contrast_del_y_block_sum, float *contrast_del_z_block_sum, int prev_gridsize)
+{
+    float *image_del_x = image + num_elements;
+    float *image_del_y = image + num_elements * 2;
+    float *image_del_z = image + num_elements * 3;
+    // START COPY
+    float *sdata = SharedMemory<float>();
+    float temp_sum = 0;
+    uint16_t tid = threadIdx.x;
+    // 85 partial sums to go
+    // dump partial sums inside again
+    if (tid < prev_gridsize)
+    {
+
+        if (blockIdx.x == 0)
+        {
+            temp_sum = contrast_block_sum[tid];
+        }
+        else if (blockIdx.x == 1)
+        {
+            temp_sum = contrast_del_x_block_sum[tid];
+        }
+        else if (blockIdx.x == 2)
+        {
+            temp_sum = contrast_del_y_block_sum[tid];
+        }
+        else if (blockIdx.x == 3)
+        {
+            temp_sum = contrast_del_z_block_sum[tid];
+        }
+    }
+    sdata[tid] = temp_sum;
+    __syncthreads();
+    if ((tid) < 64)
+    {
+        sdata[tid] = temp_sum = temp_sum + sdata[tid + 64];
+    }
+    __syncthreads();
+    if ((tid) < 32)
+    {
+        // warps of 32 threads are always in sync, no need to sync after this
         temp_sum += sdata[tid + 32];
         // Reduce final warp using shuffle
         for (uint8_t offset = 32 / 2; offset > 0; offset = offset >> 1)
@@ -578,7 +849,7 @@ __global__ void getContrastDelBatchReduceHarder_(float *image, int num_elements,
         {
             means[2] = temp_sum / num_elements;
         }
-        else
+        else if (blockIdx.x == 3)
         {
             means[3] = temp_sum / num_elements;
         }
@@ -592,21 +863,27 @@ __global__ void getContrastDelBatchReduceHarder_(float *image, int num_elements,
     size_t thread_grid_idx = size_t(blockIdx.x * blockDim.x + threadIdx.x);
     // size_t num_threads_in_grid = size_t(blockDim.x * gridDim.x);
     size_t idx = thread_grid_idx;
-    __syncthreads();
+    // __syncthreads();
+    auto g = cooperative_groups::this_grid();
+    // auto g = cooperative_groups::this_thread_block();
+    g.sync();
+    float mean = means[0];
+    float xmean = means[1];
+    float ymean = means[2];
+    float zmean = means[3];
+
     while (idx < num_elements)
     {
-        float image_norm = image[idx] - means[0];
-        float image_norm_x = image_del_x[idx] - means[1];
-        float image_norm_y = image_del_y[idx] - means[2];
-        float image_norm_z = image_del_z[idx] - means[3];
-        image_contrast = image_norm * image_norm;
-        image_contrast_del_theta_x = image_norm * image_norm_x;
-        image_contrast_del_theta_y = image_norm * image_norm_y;
-        image_contrast_del_theta_z = image_norm * image_norm_z;
+        float image_norm = image[idx] - mean;
+        float image_norm_x = image_del_x[idx] - xmean;
+        float image_norm_y = image_del_y[idx] - ymean;
+        float image_norm_z = image_del_z[idx] - zmean;
+        image_contrast += image_norm * image_norm;
+        image_contrast_del_theta_x += image_norm_x * image_norm;
+        image_contrast_del_theta_y += image_norm_y * image_norm;
+        image_contrast_del_theta_z += image_norm_z * image_norm;
         idx += blockDim.x * gridDim.x;
     }
-    // float *sdata = SharedMemory<float>();
-    // uint16_t tid = threadIdx.x;
 
     // do reduction in shared mem
 
@@ -645,7 +922,7 @@ __global__ void getContrastDelBatchReduceHarder_(float *image, int num_elements,
         sdata[tid] = image_contrast_del_theta_y = image_contrast_del_theta_y + sdata[tid + 256];
     __syncthreads();
     if (tid < 128)
-        image_contrast_del_theta_y = image_contrast_del_theta_y + sdata[tid + 128];
+        sdata[tid] = image_contrast_del_theta_y = image_contrast_del_theta_y + sdata[tid + 128];
     __syncthreads();
     // store y in 256 to 383
     if (tid >= 256 && tid < 384)
@@ -669,6 +946,7 @@ __global__ void getContrastDelBatchReduceHarder_(float *image, int num_elements,
     {
         temp_sum = sdata[tid - 384];
     }
+    __syncthreads();
     // dump partial sums inside again
     sdata[tid] = temp_sum;
     __syncthreads();
@@ -679,6 +957,7 @@ __global__ void getContrastDelBatchReduceHarder_(float *image, int num_elements,
     __syncthreads();
     if ((tid & 0x7F) < 32)
     {
+        // warps of 32 threads are always in sync, no need to sync after this
         temp_sum += sdata[tid + 32];
         // Reduce final warp using shuffle
         for (uint8_t offset = 32 / 2; offset > 0; offset = offset >> 1)
@@ -686,7 +965,6 @@ __global__ void getContrastDelBatchReduceHarder_(float *image, int num_elements,
             temp_sum += __shfl_down_sync(FULL_MASK, temp_sum, offset);
         }
     }
-    __syncthreads();
 
     if (tid == 0)
     {
@@ -715,7 +993,8 @@ template <int prev_gridsize>
 __global__ void getContrastDelBatchReduceHarderPt2_(float *contrast_block_sum, float *contrast_del_x_block_sum, float *contrast_del_y_block_sum, float *contrast_del_z_block_sum)
 {
     float *sdata = SharedMemory<float>();
-    float temp_sum;
+
+    float temp_sum = 0;
     uint16_t tid = threadIdx.x;
     // 85 partial sums to go
     // dump partial sums inside again
@@ -734,14 +1013,10 @@ __global__ void getContrastDelBatchReduceHarderPt2_(float *contrast_block_sum, f
         {
             temp_sum = contrast_del_y_block_sum[tid];
         }
-        else
+        else if (blockIdx.x == 3)
         {
             temp_sum = contrast_del_z_block_sum[tid];
         }
-    }
-    else
-    {
-        temp_sum = 0;
     }
     sdata[tid] = temp_sum;
     __syncthreads();
@@ -763,6 +1038,7 @@ __global__ void getContrastDelBatchReduceHarderPt2_(float *contrast_block_sum, f
     __syncthreads();
     if ((tid) < 32)
     {
+        // warps of 32 threads are always in sync, no need to sync after this
         temp_sum += sdata[tid + 32];
         // Reduce final warp using shuffle
         for (uint8_t offset = 32 / 2; offset > 0; offset = offset >> 1)
@@ -828,6 +1104,7 @@ __global__ void meanPt2_(float *contrast_block_sum, float *contrast_del_x_block_
     __syncthreads();
     if ((tid) < 32)
     {
+        // warps of 32 threads are always in sync, no need to sync after this
         temp_sum += sdata[tid + 32];
         // Reduce final warp using shuffle
         for (uint8_t offset = 32 / 2; offset > 0; offset = offset >> 1)
@@ -867,24 +1144,93 @@ void getContrastDelBatchReduce(float *image,
                                int num_events,
                                cudaStream_t const *stream)
 {
-    int blockSize = 512; // The launch configurator returned block size
-    int prev_gridsize = (num_events + blockSize - 1) / blockSize;
+    int dev = 0;
+    // cudaDeviceProp deviceProp;
+    // cudaGetDeviceProperties(&deviceProp, dev);
+    // /// This will launch a grid that can maximally fill the GPU, on the default stream with kernel arguments
+    // int numBlocksPerSm = 0;
+    // // Number of threads my_kernel will be launched with
+    // cudaDeviceProp deviceProp;
+    // cudaGetDeviceProperties(&deviceProp, dev);
+    // cudaOccupancyMaxActiveBlocksPerMultiprocessor(&numBlocksPerSm, getContrastDelBatchReduceHarder_, 512, 0);
+    // std::cout << numBlocksPerSm<<deviceProp.multiProcessorCount << std::endl;
+    // cudaOccupancyMaxActiveBlocksPerMultiprocessor(&numBlocksPerSm, getContrastDelBatchReduceHarder_, 256, 0);
+    // std::cout << numBlocksPerSm<<deviceProp.multiProcessorCount << std::endl;
+    // cudaOccupancyMaxActiveBlocksPerMultiprocessor(&numBlocksPerSm, getContrastDelBatchReduceHarder_, 128, 0);
+    // std::cout << numBlocksPerSm<<deviceProp.multiProcessorCount << std::endl;
+
+    // int blockSize = 512; // The launch configurator returned block size
+    int blockSize = 256; // The launch configurator returned block size
+
+    int prev_blocksize=512;
+    // int prev_gridsize = (num_events + blockSize - 1) / blockSize;
+    int prev_gridsize = std::min(128, (num_events + blockSize - 1) / prev_blocksize);
+
     // int gridSize = 85; // The actual grid size needed, based on input size
-    int gridSize = std::min(512, (height * width + blockSize - 1) / blockSize);
+    // int gridSize = std::min(512, (height * width + blockSize - 1) / blockSize);
+    // int gridSize = 5 * 8;
+    int gridSize = 6 * 8;
 
     int smemSize = (blockSize <= 32) ? 2 * blockSize * sizeof(float) : blockSize * sizeof(float);
 
-    // meanPt2_<<<4, 128, 128 * sizeof(float)>>>(contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum, height * width, means,prev_gridsize);
+    // thrust::device_vector<float> imagedebug(height * width * 4);
+    // float *imagedebugptr = thrust::raw_pointer_cast(imagedebug.data());
+    // getContrastDelBatchReduceHarder_<<<gridSize, blockSize, smemSize>>>(image, height * width, means, contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum, prev_gridsize);
+    int image_pixels = height * width;
+    void *kernel_args[] = {
+        (void *)&image,
+        (void *)&image_pixels,
+        (void *)&means,
+        (void *)&contrast_block_sum,
+        (void *)&contrast_del_x_block_sum,
+        (void *)&contrast_del_y_block_sum,
+        (void *)&contrast_del_z_block_sum,
+        (void *)&prev_gridsize,
+    };
+    //    (void *)&imagedebugptr};
+    // int dev = 0;
+    // int supportsCoopLaunch = 0;
+    // cudaDeviceGetAttribute(&supportsCoopLaunch, cudaDevAttrCooperativeLaunch, dev);
+    // std::cout << supportsCoopLaunch << std::endl;
 
-    getContrastDelBatchReduceHarder_<<<gridSize, blockSize, smemSize>>>(image, height * width, means, contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum, prev_gridsize);
+    checkCudaErrors(cudaPeekAtLastError());
+    cudaLaunchCooperativeKernel((void *)getContrastDelBatchReduceHarder256_, gridSize, blockSize, kernel_args, smemSize);
+    checkCudaErrors(cudaPeekAtLastError());
+
+    // START OF DEBUG
+    // std::cout << "harder1 sum " << -thrustSum(contrast_block_sum, gridSize) / (height * width)
+    //           << " " << -2 * thrustSum(contrast_del_x_block_sum, gridSize) / (height * width)
+    //           << " " << -2 * thrustSum(contrast_del_y_block_sum, gridSize) / (height * width)
+    //           << " " << -2 * thrustSum(contrast_del_z_block_sum, gridSize) / (height * width)
+    //           << std::endl;
+
+    // END DEBUG
+    checkCudaErrors(cudaPeekAtLastError());
+    // checkCudaErrors(cudaDeviceSynchronize());
+    // checkCudaErrors(cudaDeviceSynchronize());
+    // std::cout << "thrust hardreduce             " << -thrust::reduce(imagedebug.begin(), imagedebug.begin() + height * width, 0.0, thrust::plus<float>()) / (height * width) << " "
+    //           << -2 * thrust::reduce(imagedebug.begin() + height * width, imagedebug.begin() + height * width * 2, 0.0, thrust::plus<float>()) / (height * width) << " "
+    //           << -2 * thrust::reduce(imagedebug.begin() + height * width * 2, imagedebug.begin() + height * width * 3, 0.0, thrust::plus<float>()) / (height * width) << " "
+    //           << -2 * thrust::reduce(imagedebug.begin() + height * width * 3, imagedebug.begin() + height * width * 4, 0.0, thrust::plus<float>()) / (height * width) << " "
+    //           << std::endl;
     if (height == 180 && width == 240)
-        getContrastDelBatchReduceHarderPt2_<85><<<4, 128, 128 * sizeof(float),stream[0]>>>(contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum);
+        getContrastDelBatchReduceHarderPt2_<8 * 6><<<4, 128, 128 * sizeof(float), stream[0]>>>(contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum);
     else if (height == 480 && width == 640)
-        getContrastDelBatchReduceHarderPt2_<512><<<4, 512, 512 * sizeof(float),stream[0]>>>(contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum);
+        getContrastDelBatchReduceHarderPt2_<8 * 6><<<4, 512, 512 * sizeof(float), stream[0]>>>(contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum);
+    else if (height == 400 && width == 400)
+        getContrastDelBatchReduceHarderPt2_<8 * 6><<<4, 512, 512 * sizeof(float), stream[0]>>>(contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum);
+    else if (height == 720 && width == 1280)
+        getContrastDelBatchReduceHarderPt2_<8 * 6><<<4, 512, 512 * sizeof(float), stream[0]>>>(contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum);
+    else
+    {
+        getContrastDelBatchReduceHarderPt2_<8 * 6><<<4, 512, 512 * sizeof(float), stream[0]>>>(contrast_block_sum, contrast_del_x_block_sum, contrast_del_y_block_sum, contrast_del_z_block_sum);
+    }
 
-    cudaMemsetAsync(image, 0, (height) * (width) * sizeof(float) * 4,stream[1]);
-    // cudaMemset(image, 0, (height) * (width) * sizeof(float) * 4);
-    cudaDeviceSynchronize();
+    checkCudaErrors(cudaPeekAtLastError());
+    cudaMemsetAsync(image, 0, (height) * (width) * sizeof(float) * 4, stream[1]);
+
+    checkCudaErrors(cudaDeviceSynchronize());
+    // cudaDeviceSynchronize();
     {
         nvtx3::scoped_range r{"final contrast"};
         int num_el = height * width;

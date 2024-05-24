@@ -79,7 +79,7 @@ FIND_PACKAGE(dv-processing 1.7.0 REQUIRED)
 include_directories(${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/include)
 
 # main
-cuda_add_executable(main src/main.cpp src/reduce.cu src/motion_compensation.cu )
+cuda_add_executable(main src/main.cpp src/motion_compensation_float.cu )
 set_property(TARGET main PROPERTY CUDA_ARCHITECTURES 87)
 # set_target_properties(main PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 target_include_directories(main
@@ -93,10 +93,39 @@ target_link_libraries(main
     nvtx3-cpp
     dv::processing
 )
+# main lbfgsb
+cuda_add_executable(main_lbfgsb src/main_lbfgsb.cpp src/motion_compensation_float.cu )
+set_property(TARGET main_lbfgsb PROPERTY CUDA_ARCHITECTURES 87)
+# set_target_properties(main PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+target_include_directories(main_lbfgsb
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_link_libraries(main_lbfgsb
+    ${CUDA_LIBRARIES}
+    jetson-utils
+    ${OpenCV_LIBS}
+    nvtx3-cpp
+    dv::processing
+)
+# main double
+cuda_add_executable(main_double src/main_double.cpp  src/motion_compensation_double.cu )
+set_property(TARGET main_double PROPERTY CUDA_ARCHITECTURES 87)
+# set_target_properties(main PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+target_include_directories(main_double
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_link_libraries(main_double
+    Ceres::ceres
+    ${CUDA_LIBRARIES}
+    jetson-utils
+    ${OpenCV_LIBS}
+    nvtx3-cpp
+    dv::processing
+)
 
 # main_txt
-cuda_add_executable(main_txt src/main_txt.cpp src/reduce.cu src/motion_compensation.cu )
-set_property(TARGET main PROPERTY CUDA_ARCHITECTURES 87)
+cuda_add_executable(main_txt src/main_txt.cpp src/motion_compensation_float.cu )
+set_property(TARGET main_txt PROPERTY CUDA_ARCHITECTURES 87)
 # set_target_properties(main PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 target_include_directories(main_txt
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
@@ -111,7 +140,7 @@ target_link_libraries(main_txt
 )
 
 # aedat_mc
-cuda_add_executable(aedat_mc src/aedat_mc.cpp src/reduce.cu src/motion_compensation.cu )
+cuda_add_executable(aedat_mc src/aedat_mc.cpp src/motion_compensation_float.cu )
 set_property(TARGET aedat_mc PROPERTY CUDA_ARCHITECTURES 87)
 # set_target_properties(main PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 target_include_directories(aedat_mc
@@ -126,7 +155,7 @@ target_link_libraries(aedat_mc
     dv::processing
 )
 # main gsl
-cuda_add_executable(main_gsl src/main_gsl.cpp src/reduce.cu src/motion_compensation.cu )
+cuda_add_executable(main_gsl src/main_gsl.cpp src/motion_compensation_float.cu )
 # set_target_properties(main_gsl PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 target_include_directories(main_gsl
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
@@ -141,7 +170,7 @@ target_link_libraries(main_gsl
     nvtx3-cpp
 )
 # plot
-cuda_add_executable(plot src/plot.cpp src/reduce.cu src/motion_compensation.cu )
+cuda_add_executable(plot src/plot.cpp src/motion_compensation_float.cu )
 # set_target_properties(plot PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 target_include_directories(plot
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
@@ -153,11 +182,28 @@ target_link_libraries(plot
     ${OpenCV_LIBS}
     GSL::gsl 
     GSL::gslcblas
+    nvtx3-cpp
+    dv::processing
+)
+# plot_double
+cuda_add_executable(plot_double src/plot_double.cpp src/motion_compensation_double.cu )
+target_include_directories(plot_double
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_link_libraries(plot_double
+    Ceres::ceres
+    ${CUDA_LIBRARIES}
+    jetson-utils
+    ${OpenCV_LIBS}
+    GSL::gsl 
+    GSL::gslcblas
+    nvtx3-cpp
+    dv::processing
 )
 add_subdirectory(utils/NVTX/c)
 
 # cudatest
-cuda_add_executable(cudatest src/cudatest.cpp src/motion_compensation.cu )
+cuda_add_executable(cudatest src/cudatest.cpp src/motion_compensation_float.cu )
 set_property(TARGET cudatest PROPERTY CUDA_ARCHITECTURES 87)
 # set_target_properties(main PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 target_include_directories(cudatest

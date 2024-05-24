@@ -1,6 +1,6 @@
 
-#ifndef CUDACMAKE_TEST_H
-#define CUDACMAKE_TEST_H
+#ifndef MOTION_COMPENSATION_FLOAT_H
+#define MOTION_COMPENSATION_FLOAT_H
 #include <stdint.h>
 #include <reduce.h>
 #include <nvtx3/nvtx3.hpp>
@@ -23,4 +23,6 @@ void getContrastDelBatchReduce(float *image,
                                cudaStream_t const* stream);
 void one_step_kernel(uint64_t seed, float* randoms, int numel);
 float thrustMean(float* image_,int height_,int width_);
-#endif // CUDACMAKE_TEST_H
+void warpEvents(float fx, float fy, float cx, float cy, int height, int width, int num_events, float *x_unprojected, float *y_unprojected, float *x_prime, float *y_prime, float *t, const float rotation_x, const float rotation_y, const float rotation_z);
+
+#endif // MOTION_COMPENSATION_H

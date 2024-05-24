@@ -8,8 +8,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <jetson-utils/cudaMappedMemory.h>
-#include "motion_compensation.h"
-// #include "reduce.h"
+#include "motion_compensation_float.h"
 #include "utils.h"
 
 #include <fstream>
@@ -67,17 +66,20 @@ public:
 
         // precalculate tX-t0 and store to t (potentially redo in CUDA later on)
         // float scale=t[num_events-1]-t[0];
-        float scale = 1e6;
+        float scale = 1;
         float t_cpu[num_events_];
-        // find the middle t
-        float middle_t = (t[num_events_ - 1] + t[0]) / 2;
+        // // find the middle t
+        // float middle_t = (t[num_events_ - 1] + t[0]) / 2;
 
-        for (int i = 1; i < num_events_; i++)
-        {
-            t_cpu[i] = (t[i] - middle_t) / scale;
-        }
+        // for (int i = 1; i < num_events_; i++)
+        // {
+        //     t_cpu[i] = (t[i] - middle_t) / scale;
+        // }
+
         cudaMemcpy(t_, t_cpu, num_events_ * sizeof(float), cudaMemcpyHostToDevice);
 
+        //EVK4
+        cudaMemcpy(t_, t.data(), num_events_ * sizeof(float), cudaMemcpyHostToDevice);
         // precalculate unprojected x and y and store to x/y_unprojected (potentially redo in CUDA later on)
         float x_unprojected_cpu[num_events_];
         float y_unprojected_cpu[num_events_];
